@@ -1,0 +1,14 @@
+.{
+    .name = .aposeij,
+    .fingerprint = 0x8e232b6317713c58,
+    .version = "0.0.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        // For example...
+        //"LICENSE",
+        //"README.md",
+    },
+}
