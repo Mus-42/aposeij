@@ -16,7 +16,7 @@ pub fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     }
 
     var moves = board.Moves{};
-    board.genMoves(brd.data, &moves, false);
+    board.genMoves(brd.data, &moves);
 
     // comment this out for non-bulk perft
     // if (remaining_depth == 1) {
@@ -41,10 +41,10 @@ pub fn perft_root(brd: *board.Board, remaining_depth: u32) u64 {
         brd.debugDumpMoveHistory();
     }
 
-    board.genMoves(brd.data, &moves, false);
+    board.genMoves(brd.data, &moves);
     const impl = struct {
         fn lessThan(_: void, a: board.Move, b: board.Move) bool {
-            return std.mem.lessThan(u8, &a.algebraicNotation(), &b.algebraicNotation());
+            return std.mem.lessThan(u8, &a.algebraicNotation().buf, &b.algebraicNotation().buf);
         }
     };
     std.mem.sortUnstable(board.Move, moves.p[0..moves.i], {}, impl.lessThan);
@@ -53,7 +53,7 @@ pub fn perft_root(brd: *board.Board, remaining_depth: u32) u64 {
     for (moves.moves()) |move| {
         brd.makeMove(move);
         const move_count = perft(brd, remaining_depth - 1);
-        writer.print("{s} - {d}\n", .{move.algebraicNotation(), move_count}) catch unreachable;
+        writer.print("{s} - {d}\n", .{move.algebraicNotation().toStr(), move_count}) catch unreachable;
         pos_count += move_count;
         brd.unmakeMove();
     }

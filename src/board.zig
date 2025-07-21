@@ -262,13 +262,22 @@ pub const Board = struct {
         self.data = self.history.pop().?.data;
     }
 
+    pub fn setBoardData(self: *Self, bd: BoardData) void {
+        self.clearHistory();
+        self.data = bd;
+    }
+    
+    pub fn clearHistory(self: *Self) void {
+        self.history.clearRetainingCapacity();
+    }
+
     pub fn deinit(self: *Self) void {
         self.history.deinit(self.alloc);
     }
 
     pub fn debugDumpMoveHistory(self: *const Self) void {
         for (self.history.items) |entry| {
-            std.debug.print("{s} ", .{entry.move.algebraicNotation()});
+            std.debug.print("{s} ", .{entry.move.algebraicNotation().toStr()});
         }
         std.debug.print("\n", .{});
     }
@@ -508,6 +517,14 @@ pub const Move = packed struct (u16) {
         promotion: PromotionTarget,
     };
 
+    const MoveStrBuf = struct {
+        buf: [5]u8,
+
+        pub fn toStr(self: *const MoveStrBuf) []const u8 {
+            return std.mem.trim(u8, &self.buf, &.{' '});
+        }
+    };
+
     from: Square,
     to: Square,
     is_promotion: bool = false,
@@ -517,6 +534,8 @@ pub const Move = packed struct (u16) {
 
     const Self = @This();
 
+    pub const NULL: Self = .{ .from = 0, .to = 0, .extra = .{ .quiet = .none }};
+
     pub fn isLooksLikePawn2SquareMove(self: Self) bool {
         const move_mask = @as(u64, 1) << self.to | @as(u64, 1) << self.from;
         const PAWN_LINES_MASK_W = rankMask(1) | rankMask(3);
@@ -524,7 +543,7 @@ pub const Move = packed struct (u16) {
         return PAWN_LINES_MASK_W & move_mask == move_mask or PAWN_LINES_MASK_B & move_mask == move_mask;
     }
     
-    pub fn algebraicNotation(self: Self) [5]u8 {
+    pub fn algebraicNotation(self: Self) MoveStrBuf {
         var ret: [5]u8 = undefined;
 
         ret[0..2].* = SQUARE_TO_STRING[self.from];
@@ -536,7 +555,7 @@ pub const Move = packed struct (u16) {
             .queen  => 'q',
         } else ' ';
 
-        return ret;
+        return MoveStrBuf { .buf = ret };
     }
 };
 
@@ -659,6 +678,10 @@ pub const Moves = struct {
         self.i = 0;
     }
 
+    pub fn count(self: *const Self) usize {
+        return self.i;
+    }
+
     pub fn add(self: *Self, move: Move) void {
         self.p[self.i] = move;
         self.i += 1;
@@ -669,12 +692,11 @@ pub const Moves = struct {
     }
 };
 
-pub fn genMoves(board: Board.BoardData, moves: *Moves, comptime only_captures: bool) void {
+pub fn genMoves(board: Board.BoardData, moves: *Moves) void {
     var state = computeMovegenState(board);
     if (board.side_to_move != .white) {
         state = sideFlipState(state);
     }
-    _ = only_captures;
 
     genWhiteMoves(state, moves);
 

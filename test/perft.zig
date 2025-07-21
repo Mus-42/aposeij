@@ -7,7 +7,7 @@ pub fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     }
 
     var moves = board.Moves{};
-    board.genMoves(brd.data, &moves, false);
+    board.genMoves(brd.data, &moves);
 
     if (remaining_depth == 1) {
         return moves.i;
