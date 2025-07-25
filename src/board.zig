@@ -131,7 +131,7 @@ const MAX_HISTORY_LEN = 1024;
 pub const Board = struct {
     pub const BoardData = struct {
         pieces: [12]u64,
-        halfmoves: u12 = 0,
+        fullmoves: u12 = 0,
         halfmoves50: u6 = 0,
         castling_rights: CastlingRights = .{},
         side_to_move: SideToMove = .white,
@@ -184,6 +184,30 @@ pub const Board = struct {
                 std.debug.print("\n", .{});
             }
         }
+
+        pub fn recomputeZobristKey(self: *BoardData) void {
+            var key: u64 = 0;
+
+            for (0..12) |i| {
+                var piece = self.pieces[i];
+                while (piece != 0) : (piece &= piece - 1) {
+                    const pos = @ctz(piece);
+                    key ^= zobrist_hash.PIECES[i << 6 | pos];
+                }
+            }
+
+            key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.castling_rights))];
+            
+            if (self.side_to_move == .black) {
+                key ^= zobrist_hash.SIDE_TO_MOVE;
+            }
+
+            if (self.en_passant_target) |square| {
+                key ^= zobrist_hash.EP_FILE[square & 7];
+            }
+
+            self.zobrist_key = key;
+        }
     };
 
     alloc: Alloc,
@@ -215,10 +239,14 @@ pub const Board = struct {
         self.data.castling_rights.updateAfterMove(move);
         self.data.en_passant_target = null;
 
+        var reset_50_moves_clock = false;
+
         if (move.is_promotion) {
             const piece = self.data.popPieceAt(move.from);
             const old_piece = self.data.popPieceAt(move.to);
             const new_piece = move.extra.promotion.toPiece(self.data.side_to_move);
+
+            reset_50_moves_clock = true;
 
             std.debug.assert(piece == .w_pawn or piece == .b_pawn);
             std.debug.assert((old_piece != null) == move.is_capture);
@@ -233,6 +261,7 @@ pub const Board = struct {
 
             const king = self.data.popPieceAt(move.from).?;
             const rook = self.data.popPieceAt(rook_from).?;
+
             std.debug.assert(king == .w_king or king == .b_king);
             std.debug.assert(rook == .w_rook or rook == .b_rook);
             self.data.setPieceAt(move.to, king);
@@ -240,6 +269,9 @@ pub const Board = struct {
         } else if (move.is_capture and move.extra.capture == .ep_capture) {
             const piece = self.data.popPieceAt(move.from).?;
             const old_piece = self.data.popPieceAt(move.to ^ 8);
+
+            reset_50_moves_clock = true;
+
             std.debug.assert(old_piece != null);
             self.data.setPieceAt(move.to, piece);
         } else {
@@ -248,23 +280,58 @@ pub const Board = struct {
 
             std.debug.assert((old_piece != null) == move.is_capture);
 
-            if ((piece == .b_pawn or piece == .w_pawn) and move.isLooksLikePawn2SquareMove()) {
+            const is_pawn = piece == .b_pawn or piece == .w_pawn;
+
+            if (is_pawn and move.isLooksLikePawn2SquareMove()) {
                 self.data.en_passant_target = @intCast((@as(u7, move.from) + @as(u7, move.to)) >> 1);
             }
+
+            reset_50_moves_clock = is_pawn or move.is_capture;
 
             self.data.setPieceAt(move.to, piece);
         }
 
+        if (reset_50_moves_clock) {
+            self.data.halfmoves50 = 0;
+        }
+
         self.data.side_to_move.flip();
+        self.data.recomputeZobristKey();
     }
 
     pub fn unmakeMove(self: *Self) void {
         self.data = self.history.pop().?.data;
     }
 
+    pub fn repetitionsCount(self: *const Self) u32 {
+        const key = self.data.zobrist_key;
+        var repetitions: u32 = 0;
+        for (self.history.items) |entry| {
+            if (entry.data.zobrist_key == key) {
+                repetitions += 1;
+            }
+        }
+        return repetitions;
+    }
+
+    pub fn isInCheck(self: *const Self) bool {
+        // TODO rewrite that (too slow & too dumm)
+        var state = computeMovegenState(self.data);
+
+        if (self.data.side_to_move != .white) {
+            state = sideFlipState(state);
+        }
+
+        const attack_gen = AttackGenState.init(state);
+        const attacks = attack_gen.attacks_all;
+        const kings = state.pieces[@intFromEnum(PieceKind.w_king)];
+        return attacks & kings != 0;
+    }
+
     pub fn setBoardData(self: *Self, bd: BoardData) void {
         self.clearHistory();
         self.data = bd;
+        self.data.recomputeZobristKey();
     }
     
     pub fn clearHistory(self: *Self) void {
@@ -393,7 +460,7 @@ pub fn readFen(s: []const u8) FenReadError!Board.BoardData {
 
     const h = i;
     while (i < s.len and !std.ascii.isWhitespace(s[i])) i += 1;
-    board.halfmoves = std.fmt.parseUnsigned(u6, s[h..i], 10) catch return error.IncompleteFenData;
+    board.fullmoves = std.fmt.parseUnsigned(u6, s[h..i], 10) catch return error.IncompleteFenData;
 
     while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
 
@@ -461,7 +528,7 @@ pub fn writeFen(buffer: []u8, board: Board.BoardData) []const u8 {
 
     const en_passant = if (board.en_passant_target) |square| &SQUARE_TO_STRING[square] else "-";
 
-    const v = std.fmt.bufPrint(buffer[i..], " {s} {d} {d}", .{ en_passant, board.halfmoves50, board.halfmoves }) catch unreachable;
+    const v = std.fmt.bufPrint(buffer[i..], " {s} {d} {d}", .{ en_passant, board.halfmoves50, board.fullmoves }) catch unreachable;
     i += v.len;
 
     return buffer[0..i];
@@ -485,6 +552,46 @@ test "board representation" {
         try std.testing.expectEqualStrings(fen, writeFen(&buf, board));
     }
 }
+
+const zobrist_hash = struct {
+    const XorshiftRng = struct {
+        state: u64,
+
+        fn next(self: *XorshiftRng) u64 {
+            var x = self.state;
+
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+
+            self.state = x;
+            return x;
+        }
+    };
+
+    fn generateVectors(seed: u64, comptime size: usize) [size]u64 {
+        @setEvalBranchQuota(10000);
+
+        var rng: XorshiftRng = .{ .state = seed };
+        var ret: [size]u64 = undefined;
+        for (&ret) |*v| {
+            const a = rng.next();
+            const b = rng.next();
+            v.* = a & b;
+        }
+        return ret;
+    }
+
+    const SEED = 42;
+    const PIECES_COUNT = 12 * 64;
+    const ZOBRIST_VECTORS = generateVectors(SEED, PIECES_COUNT + 1 + 24);
+
+    const PIECES: [PIECES_COUNT]u64 = ZOBRIST_VECTORS[0..PIECES_COUNT].*;
+    const CASTLING_RIGHTS: [16]u64 = ZOBRIST_VECTORS[PIECES_COUNT..PIECES_COUNT+16].*;
+    const EP_FILE: [8]u64 = ZOBRIST_VECTORS[PIECES_COUNT+16..PIECES_COUNT+24].*;
+    const SIDE_TO_MOVE: u64 = ZOBRIST_VECTORS[PIECES_COUNT+24];
+};
+
 
 pub const Move = packed struct (u16) {
     const QuietSpetial = enum(u2) {
@@ -687,8 +794,19 @@ pub const Moves = struct {
         self.i += 1;
     }
 
-    pub fn moves(self: *const Self) []const Move {
+    pub fn moves(self: *Self) []Move {
         return self.p[0..self.i];
+    }
+
+    pub fn filterCapturesOnly(self: *Self) void {
+        var i: usize = 0;
+        for (0..self.i) |j| {
+            if (self.p[j].is_capture) {
+                self.p[i] = self.p[j];
+                i += 1;
+            }
+        }
+        self.i = i;
     }
 };
 

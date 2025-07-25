@@ -36,7 +36,7 @@ pub fn main() !void {
     var brd = try board.Board.init(alloc, startpos);
     defer brd.deinit();
 
-    var b = bot.Bot.init(alloc);
+    var b = try bot.Bot.init(alloc, &brd);
     defer b.deinit();
 
     while (true) {
@@ -98,13 +98,16 @@ pub fn main() !void {
             try writer.writeAll("readyok\n");
         } else if (std.mem.eql(u8, command, "go")) {
             // TODO
-            const best_move = b.bestMove(&brd);
+            const best_move = b.bestMove(writer.any());
             try writer.print("bestmove {s}\n", .{best_move.algebraicNotation().toStr()});
         } else if (std.mem.eql(u8, command, "ponderhit")) {
             continue;
         } else if (std.mem.eql(u8, command, "stop")) {
             // TODO
             continue;
+        } else if (std.mem.eql(u8, command, "evalpos")) {
+            const score_static = bot.Bot.whiteEval(brd.data);
+            std.debug.print("score (static): {d} (in cp, for white)\n", .{score_static});
         } else if (std.mem.eql(u8, command, "displaypos")) {
             brd.data.debugPrint();
             std.debug.print("{s}\n", .{board.writeFen(&command_buf, brd.data)});
