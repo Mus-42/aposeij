@@ -9,6 +9,7 @@ const Board = board.Board;
 const AnyWriter = std.io.AnyWriter;
 
 pub const MAX_DEPTH = 128;
+pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_s; 
 
 pub const SCORE_MATE_ABS: i16 = 32000;
 pub const SCORE_MATE_EPS: i16 = MAX_DEPTH;
@@ -94,6 +95,14 @@ pub const Stats = struct {
     tt_misses: u64 = 0,
     evals: u64 = 0,
     beta_cutoffs: u64 = 0,
+    nodes_all: u64 = 0,
+    nodes_leaf: u64 = 0,
+};
+
+pub const TimeControls = union (enum) {
+    infinite,
+    time_remaining: struct { ns: u64 },
+    to_depth: struct { target: u32 },
 };
 
 pub const Bot = struct {
@@ -102,6 +111,9 @@ pub const Bot = struct {
     per_ply: [MAX_DEPTH]PerPly = undefined,
     tt: []TTEntry,
     stats: Stats = .{},
+    is_time_over: bool = false,
+    search_start: std.time.Instant = undefined,
+    max_search_time_ns: u64 = undefined,
 
     const PerPly = struct {
         pv_move: Move,
@@ -296,6 +308,8 @@ pub const Bot = struct {
         const tt_index = zobrist_key & (self.tt.len - 1);
         var tt_move: ?Move = null;
        
+        self.stats.nodes_all += 1;
+
         if (self.tt[tt_index].key == zobrist_key) {
             self.stats.tt_hits += 1;
             if (self.tt[tt_index].depth >= remaining_depth and ply != 0) {
@@ -306,16 +320,31 @@ pub const Bot = struct {
             self.stats.tt_misses += 1;
         }
 
-        if (remaining_depth == 0) {
-            return self.quiescenceSearch(root_alpha, beta, ply);
-        }
-
         const pos_repetitions = self.brd.repetitionsCount();
-
         if (pos_repetitions > 0 and ply > 0) {
             return root_alpha;
         }
-        
+
+        const static_eval = self.quiescenceSearch(root_alpha, beta, ply);
+        var score = -SCORE_INFINITY;
+        var alpha = root_alpha;
+
+        if (ply > 0) {
+            score = static_eval;
+            if (static_eval >= beta) {
+                self.stats.beta_cutoffs += 1;
+                return static_eval;
+            }
+            if (static_eval > alpha) {
+                alpha = static_eval;
+            }
+        }
+
+        if (remaining_depth == 0) {
+            self.stats.nodes_leaf += 1;
+            return static_eval;
+        }
+
         var moves = board.Moves{};
         board.genMoves(self.brd.data, &moves);
 
@@ -329,8 +358,8 @@ pub const Bot = struct {
 
         self.orderMoves(moves.moves(), ply, tt_move);
 
-        var score = -SCORE_INFINITY;
-        var alpha = root_alpha;
+        // var score = -SCORE_INFINITY;
+        // var alpha = root_alpha;
         for (0.., moves.moves()) |i, move| {
             const search_depth = if (remaining_depth > 2 and i > 5) @max(remaining_depth * 2 / 3, 2) - 1 else remaining_depth - 1;
 
@@ -354,7 +383,8 @@ pub const Bot = struct {
                     self.per_ply[ply].killers[0] = move; 
                 }
                 self.stats.beta_cutoffs += 1;
-                return move_score;
+                score = move_score;
+                break;
             }
 
             if (move_score > score) {
@@ -365,7 +395,8 @@ pub const Bot = struct {
                 }
             }
         }
-
+        
+        // TODO verify that depth < 
         self.tt[tt_index] = .{
             .move = self.per_ply[ply].pv_move,
             .score = score,
@@ -376,15 +407,30 @@ pub const Bot = struct {
         return score;
     }
 
-    pub fn bestMove(self: *Self, uci_writer: AnyWriter) Move {
-        const DEPTH = 8;
+
+
+    pub fn bestMove(self: *Self, uci_writer: AnyWriter, time_controls: TimeControls) Move {
+        var depth_target: u32 = MAX_DEPTH;
+        var max_thinking_time: u64 = MAX_THINKING_TIME_NS;
+
+        switch (time_controls) {
+            .infinite => {},
+            .to_depth => |c| depth_target = @min(depth_target, c.target),
+            .time_remaining => |c| {
+                // TODO
+                max_thinking_time = @min(max_thinking_time, c.ns);
+            },
+        }
+        
+        self.search_start = std.time.Instant.now() catch unreachable;
+        self.is_time_over = false;
 
         for (0..16) |i| {
             self.per_ply[i].pv_move = Move.NULL;
         }
-
+    
         var score: i32 = 0;
-        for (1..DEPTH+1) |d| {
+        for (1..depth_target+1) |d| {
             self.clearStats();
             score = self.search(-SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0);
             uci_writer.print("info depth {d} score cp {}\n", .{d, score}) catch {};
@@ -397,7 +443,10 @@ pub const Bot = struct {
             uci_writer.print("info string {any}\n", .{self.stats}) catch {};
         }
         const best_move = self.per_ply[0].pv_move;
-        std.debug.assert(best_move != Move.NULL);
+        if (best_move == Move.NULL) {
+            self.logPos("null move made in") catch {};
+        }
+        //std.debug.assert(best_move != Move.NULL);
 
 
         // TODO
@@ -408,5 +457,13 @@ pub const Bot = struct {
         // }
 
         return best_move;
+    }
+
+    fn logPos(self: *Self, msg: []const u8) !void {
+        const log = try std.fs.createFileAbsolute("/home/mus/projects/aposeij/dumm_pos.txt", .{ .truncate = false });
+        defer log.close();
+
+        var fen_buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
+        try log.writer().print("{s}: {s}\n", .{msg, board.writeFen(&fen_buf, self.brd.data)});
     }
 };

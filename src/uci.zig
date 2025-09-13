@@ -91,14 +91,22 @@ pub fn main() !void {
                     break;
                 }
             }
-            brd.clearHistory();
         } else if (std.mem.eql(u8, command, "ucinewgame")) {
             // TODO reset bot & board in smart way?
         } else if (std.mem.eql(u8, command, "isready")) {
             try writer.writeAll("readyok\n");
         } else if (std.mem.eql(u8, command, "go")) {
             // TODO
-            const best_move = b.bestMove(writer.any());
+            // var depth: ?u32 = null;
+            // var time: ?u32 = null;
+            // while (command_parts.next()) |cmd| {
+            //     if (std.mem.eql(u8, cmd, "infinite")) {
+            //         // TODO
+            //     } else if (std.mem.eql(u8, cmd, "depth")) {
+            //         // TODO
+            //     } else break;
+            // }
+            const best_move = b.bestMove(writer.any(), .{ .to_depth = .{ .target = 8 } });
             try writer.print("bestmove {s}\n", .{best_move.algebraicNotation().toStr()});
         } else if (std.mem.eql(u8, command, "ponderhit")) {
             continue;
