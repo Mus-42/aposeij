@@ -180,7 +180,7 @@ pub const Bot = struct {
         }
     }
 
-    fn clearStats(self: *Self) void {
+    fn preSearchCleanup(self: *Self) void {
         self.stats = .{};
     }
 
@@ -244,7 +244,6 @@ pub const Bot = struct {
             scores[i] = self.scoreMove(moves[i], ply, tt_move);
         }
         std.mem.sortUnstableContext(0, moves.len, Context { .moves = moves, .scores = scores[0..moves.len] });
-        //std.debug.print("{any}\n", .{scores[0..moves.len]});
     }
 
     fn quiescenceSearch(self: *Self, root_alpha: i16, beta: i16, ply: u32) i16 {
@@ -286,10 +285,6 @@ pub const Bot = struct {
             self.brd.unmakeMove();
 
             if (move_score >= beta) {
-                if (!move.is_capture) {
-                    self.per_ply[ply].killers[1] = self.per_ply[ply].killers[0]; 
-                    self.per_ply[ply].killers[0] = move; 
-                }
                 self.stats.beta_cutoffs += 1;
                 return move_score;
             }
@@ -304,6 +299,14 @@ pub const Bot = struct {
         }
 
         return score;
+    }
+
+    fn addKiller(self: *Self, ply: u32, move: Move) void {
+        const killers = &self.per_ply[ply].killers;
+        if (killers[0] != move and killers[1] != move) {
+            killers[1] = killers[0]; 
+            killers[0] = move; 
+        }
     }
 
     fn perPlyPv(self: *Self, ply: u32) []Move {
@@ -323,14 +326,17 @@ pub const Bot = struct {
         const zobrist_key = self.brd.data.zobrist_key;
         const tt_index = zobrist_key & (self.tt.len - 1);
         var tt_move: ?Move = null;
-       
+
         self.stats.nodes_all += 1;
+
+        @memset(self.perPlyPv(ply), Move.NULL);
 
         if (self.tt[tt_index].key == zobrist_key) {
             self.stats.tt_hits += 1;
-            if (self.tt[tt_index].depth >= remaining_depth and ply != 0) {
-                return self.tt[tt_index].score;
-            }
+            // TODO better TT
+            // if (self.tt[tt_index].depth >= remaining_depth and ply > 0) {
+            //     return self.tt[tt_index].score;
+            // }
             tt_move = self.tt[tt_index].move;
         } else {
             self.stats.tt_misses += 1;
@@ -338,23 +344,24 @@ pub const Bot = struct {
 
         const pos_repetitions = self.brd.repetitionsCount();
         if (pos_repetitions > 0 and ply > 0) {
-            return root_alpha;
+            return 0;
         }
 
         const static_eval = self.quiescenceSearch(root_alpha, beta, ply);
         var score = -SCORE_INFINITY;
         var alpha = root_alpha;
 
-        if (ply > 0) {
-            score = static_eval;
-            if (static_eval >= beta) {
-                self.stats.beta_cutoffs += 1;
-                return static_eval;
-            }
-            if (static_eval > alpha) {
-                alpha = static_eval;
-            }
-        }
+        // TODO fix not-seeing-mate-in-1-move problem with this
+        // if (ply > 0) {
+        //     score = static_eval;
+        //     if (static_eval >= beta) {
+        //         self.stats.beta_cutoffs += 1;
+        //         return static_eval;
+        //     }
+        //     if (static_eval > alpha) {
+        //         alpha = static_eval;
+        //     }
+        // }
 
         if (remaining_depth == 0) {
             self.stats.nodes_leaf += 1;
@@ -371,11 +378,8 @@ pub const Bot = struct {
             return 0;
         }
 
-
         self.orderMoves(moves.moves(), ply, tt_move);
 
-        // var score = -SCORE_INFINITY;
-        // var alpha = root_alpha;
         var best_move: Move = Move.NULL;
         for (0.., moves.moves()) |i, move| {
             const search_depth = if (remaining_depth > 2 and i > 5) @max(remaining_depth * 2 / 3, 2) - 1 else remaining_depth - 1;
@@ -396,27 +400,23 @@ pub const Bot = struct {
 
             if (move_score >= beta) {
                 if (!move.is_capture) {
-                    self.per_ply[ply].killers[1] = self.per_ply[ply].killers[0]; 
-                    self.per_ply[ply].killers[0] = move; 
+                    self.addKiller(ply, move);
                 }
                 self.stats.beta_cutoffs += 1;
                 score = move_score;
+                best_move = move;
                 break;
             }
 
             if (move_score > score) {
                 score = move_score;
+                self.setNewPvMoveAtPly(move, ply);
+                best_move = move;
                 if (score > alpha) { 
                     alpha = score;
-                    best_move = move;
-                    self.setNewPvMoveAtPly(move, ply);
-                    //self.per_ply[ply].pv_move = move;
                 }
             }
         }
-
-        // NOTE:
-        // best_move _can_ be null here
         
         // TODO verify that depth < 
         self.tt[tt_index] = .{
@@ -428,8 +428,6 @@ pub const Bot = struct {
 
         return score;
     }
-
-
 
     pub fn bestMove(self: *Self, uci_writer: *std.io.Writer, time_controls: TimeControls) Move {
         var depth_target: u32 = MAX_DEPTH;
@@ -446,12 +444,10 @@ pub const Bot = struct {
         
         self.search_start = std.time.Instant.now() catch unreachable;
         self.is_time_over = false;
-
-        @memset(self.pv_moves, Move.NULL);
     
         var score: i32 = 0;
         for (1..depth_target+1) |d| {
-            self.clearStats();
+            self.preSearchCleanup();
             score = self.search(-SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0);
             uci_writer.print("info depth {d} score cp {} pv", .{d, score}) catch {};
             for (self.perPlyPv(0)) |move| {
@@ -460,6 +456,7 @@ pub const Bot = struct {
             }
             uci_writer.print("\n", .{}) catch {};
             uci_writer.print("info string {any}\n", .{self.stats}) catch {};
+            uci_writer.flush() catch {};
         }
         const best_move = self.pv_moves[0];
         std.debug.assert(best_move != Move.NULL);

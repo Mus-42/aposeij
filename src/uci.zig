@@ -1,6 +1,7 @@
 const std = @import("std");
 const board = @import("board");
 const bot = @import("bot.zig");
+const options = @import("options");
 
 const Alloc = std.mem.Allocator;
 
@@ -11,12 +12,14 @@ const HELP =
     ;
 
 const UCI_ID = 
-    \\id name Aposeij
+    \\id name
+    ++ " " ++ options.aposeij_version_string ++
     \\id author Mus_42
     \\
     ;
 
-var command_buf: [1024]u8 = undefined;
+var stdin_buf: [4096]u8 = undefined;
+var stdout_buf: [256]u8 = undefined;
 
 pub fn main() !void {
     // TODO use real allocator here
@@ -24,8 +27,6 @@ pub fn main() !void {
     defer std.debug.assert(debug_alloc.deinit() == .ok);
     const alloc = debug_alloc.allocator();
 
-    var stdin_buf: [256]u8 = undefined;
-    var stdout_buf: [256]u8 = undefined;
 
     var stdin = std.fs.File.stdin().reader(&stdin_buf);
     var stdout = std.fs.File.stdout().writer(&stdout_buf);
@@ -109,7 +110,7 @@ pub fn main() !void {
             //         // TODO
             //     } else break;
             // }
-            const best_move = b.bestMove(&stdout.interface, .{ .to_depth = .{ .target = 8 } });
+            const best_move = b.bestMove(&stdout.interface, .{ .to_depth = .{ .target = 6 } });
             try stdout.interface.print("bestmove {s}\n", .{best_move.algebraicNotation().toStr()});
         } else if (std.mem.eql(u8, command, "ponderhit")) {
             continue;
@@ -121,7 +122,8 @@ pub fn main() !void {
             std.debug.print("score (static): {d} (in cp, for white)\n", .{score_static});
         } else if (std.mem.eql(u8, command, "displaypos")) {
             brd.data.debugPrint();
-            std.debug.print("{s}\n", .{board.writeFen(&command_buf, brd.data)});
+            var fen_buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
+            std.debug.print("{s}\n", .{board.writeFen(&fen_buf, brd.data)});
         } else if (std.mem.eql(u8, command, "help")) {
             try stdout.interface.writeAll(HELP);
         } else {

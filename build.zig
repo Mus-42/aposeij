@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     
@@ -30,6 +30,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{ .{ .name = "board", .module = board } }
     });
+
+    var exit_code: u8 = undefined;
+    const git_commit = b.runAllowFail(&.{"git", "rev-parse", "--short", "HEAD"}, &exit_code, .Ignore) catch "unknown";
+
+    const aposeij_options = b.addOptions();
+    // TODO use hash for clean tree, "dev" + hash for tree with changes, version for tagget commit
+    aposeij_options.addOption([]const u8, "aposeij_version_string", b.fmt("Aposeij commit {s}", .{git_commit}));
+    aposeij_root_module.addOptions("options", aposeij_options);
 
     const aposeij = b.addExecutable(.{
         .name = "aposeij",
@@ -95,3 +103,4 @@ pub fn build(b: *std.Build) void {
     const perft_test_step = b.step("perft_test", "Run perft (movegen) tests");
     perft_test_step.dependOn(&run_perft_test_cmd.step);
 }
+
