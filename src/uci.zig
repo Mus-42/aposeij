@@ -24,11 +24,11 @@ pub fn main() !void {
     defer std.debug.assert(debug_alloc.deinit() == .ok);
     const alloc = debug_alloc.allocator();
 
-    const stdin = std.io.getStdIn();
-    const stdout = std.io.getStdOut();
+    var stdin_buf: [256]u8 = undefined;
+    var stdout_buf: [256]u8 = undefined;
 
-    const reader = stdin.reader();
-    const writer = stdout.writer();
+    var stdin = std.fs.File.stdin().reader(&stdin_buf);
+    var stdout = std.fs.File.stdout().writer(&stdout_buf);
     
     //const log = try std.fs.cwd().createFile("log.txt", .{});
     const startpos = try board.readFen(board.DEFAULT_FEN_STRING);
@@ -40,9 +40,12 @@ pub fn main() !void {
     defer b.deinit();
 
     while (true) {
-        const command_full = try reader.readUntilDelimiterOrEof(&command_buf, '\n') orelse break;
-        // try log.writeAll(command_full);
-        // try log.writeAll("\n");
+        const command_full = stdin.interface.takeDelimiterInclusive('\n') catch |err| {
+            if (err == error.EndOfStream) {
+                break;
+            }
+            return err;
+        };
             
         var command_parts = std.mem.splitScalar(u8, std.mem.trim(u8, command_full, &std.ascii.whitespace), ' ');
         const command = command_parts.next() orelse continue;
@@ -50,8 +53,8 @@ pub fn main() !void {
         if (command.len == 0) continue;
 
         if (std.mem.eql(u8, command, "uci")) {
-            try writer.writeAll(UCI_ID);
-            try writer.writeAll("uciok\n");
+            try stdout.interface.writeAll(UCI_ID);
+            try stdout.interface.writeAll("uciok\n");
         } else if (std.mem.eql(u8, command, "quit")) {
             break;
         } else if (std.mem.eql(u8, command, "setoption")) {
@@ -94,7 +97,7 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, command, "ucinewgame")) {
             // TODO reset bot & board in smart way?
         } else if (std.mem.eql(u8, command, "isready")) {
-            try writer.writeAll("readyok\n");
+            try stdout.interface.writeAll("readyok\n");
         } else if (std.mem.eql(u8, command, "go")) {
             // TODO
             // var depth: ?u32 = null;
@@ -106,8 +109,8 @@ pub fn main() !void {
             //         // TODO
             //     } else break;
             // }
-            const best_move = b.bestMove(writer.any(), .{ .to_depth = .{ .target = 8 } });
-            try writer.print("bestmove {s}\n", .{best_move.algebraicNotation().toStr()});
+            const best_move = b.bestMove(&stdout.interface, .{ .to_depth = .{ .target = 8 } });
+            try stdout.interface.print("bestmove {s}\n", .{best_move.algebraicNotation().toStr()});
         } else if (std.mem.eql(u8, command, "ponderhit")) {
             continue;
         } else if (std.mem.eql(u8, command, "stop")) {
@@ -120,9 +123,12 @@ pub fn main() !void {
             brd.data.debugPrint();
             std.debug.print("{s}\n", .{board.writeFen(&command_buf, brd.data)});
         } else if (std.mem.eql(u8, command, "help")) {
-            try writer.writeAll(HELP);
+            try stdout.interface.writeAll(HELP);
         } else {
-            try writer.print("unknown command `{s}` found. type `help` to list all available commands\n", .{command});
+            try stdout.interface.print("unknown command `{s}` found. type `help` to list all available commands\n", .{command});
         }
+        try stdout.interface.flush();
     }
+
+    try stdout.interface.flush();
 }

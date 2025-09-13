@@ -641,7 +641,8 @@ pub const Move = packed struct (u16) {
 
     const Self = @This();
 
-    pub const NULL: Self = .{ .from = 0, .to = 0, .extra = .{ .quiet = .none }};
+    // acutally impossible move
+    pub const NULL: Self = .{ .from = 0, .to = 0, .is_promotion = true, .is_capture = true, .extra = .{ .quiet = .none }};
 
     pub fn isLooksLikePawn2SquareMove(self: Self) bool {
         const move_mask = @as(u64, 1) << self.to | @as(u64, 1) << self.from;
@@ -651,6 +652,8 @@ pub const Move = packed struct (u16) {
     }
     
     pub fn algebraicNotation(self: Self) MoveStrBuf {
+        if (self == NULL) return .{ .buf = "null ".* };
+
         var ret: [5]u8 = undefined;
 
         ret[0..2].* = SQUARE_TO_STRING[self.from];
@@ -662,7 +665,7 @@ pub const Move = packed struct (u16) {
             .queen  => 'q',
         } else ' ';
 
-        return MoveStrBuf { .buf = ret };
+        return .{ .buf = ret };
     }
 };
 

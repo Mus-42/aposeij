@@ -6,8 +6,6 @@ const Move = board.Move;
 const PieceKind = board.PieceKind;
 const Board = board.Board;
 
-const AnyWriter = std.io.AnyWriter;
-
 pub const MAX_DEPTH = 128;
 pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_s; 
 
@@ -108,6 +106,7 @@ pub const TimeControls = union (enum) {
 pub const Bot = struct {
     alloc: Alloc,
     brd: *Board,
+    pv_moves: []Move,
     per_ply: [MAX_DEPTH]PerPly = undefined,
     tt: []TTEntry,
     stats: Stats = .{},
@@ -116,7 +115,6 @@ pub const Bot = struct {
     max_search_time_ns: u64 = undefined,
 
     const PerPly = struct {
-        pv_move: Move,
         killers: [2]Move,
     };
 
@@ -131,15 +129,18 @@ pub const Bot = struct {
 
     pub fn init(alloc: Alloc, brd: *Board) !Self {
         const tt = try alloc.alloc(TTEntry, TT_SIZE);
+        const pv_moves = try alloc.alloc(Move, MAX_DEPTH * (MAX_DEPTH + 1) / 2);
         return .{
             .alloc = alloc,
             .brd = brd,
+            .pv_moves = pv_moves,
             .tt = tt,
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.alloc.free(self.tt);
+        self.alloc.free(self.pv_moves);
     }
 
     pub fn whiteEval(bd: Board.BoardData) i16 {
@@ -195,9 +196,10 @@ pub const Bot = struct {
         if (tt_move == move) {
             score += 2000;
         }
-        if (self.per_ply[ply].pv_move == move) {
-            score += 1000;
-        }
+        // TODO pv move?
+        // if (self.per_ply[ply].pv_move == move) {
+        //     score += 1000;
+        // }
 
         if (self.per_ply[ply].killers[0] == move or self.per_ply[ply].killers[1] == move) {
             score += 800;
@@ -293,6 +295,7 @@ pub const Bot = struct {
             }
 
             if (move_score > score) {
+                // TODO update pv?
                 score = move_score;
                 if (score > alpha) { 
                     alpha = score;
@@ -301,6 +304,19 @@ pub const Bot = struct {
         }
 
         return score;
+    }
+
+    fn perPlyPv(self: *Self, ply: u32) []Move {
+        const count = MAX_DEPTH - ply;
+        const start = self.pv_moves.len - (count + 1) * count / 2;
+        return self.pv_moves[start..start+count];
+    }
+
+    fn setNewPvMoveAtPly(self: *Self, move: Move, ply: u32) void {
+        const pv = self.perPlyPv(ply);
+        const next_pv = self.perPlyPv(ply+1);
+        @memcpy(pv[1..], next_pv);
+        pv[0] = move;
     }
 
     fn search(self: *Self, root_alpha: i16, beta: i16, remaining_depth: u32, ply: u32) i16 {
@@ -360,6 +376,7 @@ pub const Bot = struct {
 
         // var score = -SCORE_INFINITY;
         // var alpha = root_alpha;
+        var best_move: Move = Move.NULL;
         for (0.., moves.moves()) |i, move| {
             const search_depth = if (remaining_depth > 2 and i > 5) @max(remaining_depth * 2 / 3, 2) - 1 else remaining_depth - 1;
 
@@ -391,14 +408,19 @@ pub const Bot = struct {
                 score = move_score;
                 if (score > alpha) { 
                     alpha = score;
-                    self.per_ply[ply].pv_move = move;
+                    best_move = move;
+                    self.setNewPvMoveAtPly(move, ply);
+                    //self.per_ply[ply].pv_move = move;
                 }
             }
         }
+
+        // NOTE:
+        // best_move _can_ be null here
         
         // TODO verify that depth < 
         self.tt[tt_index] = .{
-            .move = self.per_ply[ply].pv_move,
+            .move = best_move,
             .score = score,
             .depth = @intCast(remaining_depth),
             .key = zobrist_key,
@@ -409,7 +431,7 @@ pub const Bot = struct {
 
 
 
-    pub fn bestMove(self: *Self, uci_writer: AnyWriter, time_controls: TimeControls) Move {
+    pub fn bestMove(self: *Self, uci_writer: *std.io.Writer, time_controls: TimeControls) Move {
         var depth_target: u32 = MAX_DEPTH;
         var max_thinking_time: u64 = MAX_THINKING_TIME_NS;
 
@@ -425,28 +447,22 @@ pub const Bot = struct {
         self.search_start = std.time.Instant.now() catch unreachable;
         self.is_time_over = false;
 
-        for (0..16) |i| {
-            self.per_ply[i].pv_move = Move.NULL;
-        }
+        @memset(self.pv_moves, Move.NULL);
     
         var score: i32 = 0;
         for (1..depth_target+1) |d| {
             self.clearStats();
             score = self.search(-SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0);
-            uci_writer.print("info depth {d} score cp {}\n", .{d, score}) catch {};
-            // TODO fix PV recording (this produces wrong moves)
-            // uci_writer.print("info depth {d} score cp {} pv", .{d, score}) catch {};
-            // for (self.per_ply[0..4]) |e| {
-            //     uci_writer.print(" {s}", .{e.pv_move.algebraicNotation().toStr()}) catch {};
-            // }
-            // uci_writer.print("\n", .{}) catch {};
+            uci_writer.print("info depth {d} score cp {} pv", .{d, score}) catch {};
+            for (self.perPlyPv(0)) |move| {
+                if (move == Move.NULL) break;
+                uci_writer.print(" {s}", .{move.algebraicNotation().toStr()}) catch {};
+            }
+            uci_writer.print("\n", .{}) catch {};
             uci_writer.print("info string {any}\n", .{self.stats}) catch {};
         }
-        const best_move = self.per_ply[0].pv_move;
-        if (best_move == Move.NULL) {
-            self.logPos("null move made in") catch {};
-        }
-        //std.debug.assert(best_move != Move.NULL);
+        const best_move = self.pv_moves[0];
+        std.debug.assert(best_move != Move.NULL);
 
 
         // TODO
@@ -459,11 +475,4 @@ pub const Bot = struct {
         return best_move;
     }
 
-    fn logPos(self: *Self, msg: []const u8) !void {
-        const log = try std.fs.createFileAbsolute("/home/mus/projects/aposeij/dumm_pos.txt", .{ .truncate = false });
-        defer log.close();
-
-        var fen_buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
-        try log.writer().print("{s}: {s}\n", .{msg, board.writeFen(&fen_buf, self.brd.data)});
-    }
 };

@@ -1,14 +1,14 @@
 const std = @import("std");
 const board = @import("board");
 const Alloc = std.mem.Allocator;
-const Writer = std.io.AnyWriter;
+const Writer = std.io.Writer;
 
 
 test {
     _ = board;
 }
 
-var writer: Writer = undefined;
+var writer: *Writer = undefined;
 
 pub fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     if (remaining_depth == 0) {
@@ -135,8 +135,9 @@ pub fn main() !void {
 
     const args = try readArgs(alloc);
 
-    var buf_writer = std.io.bufferedWriter(std.io.getStdOut().writer());
-    writer = buf_writer.writer().any();
+    var stdout_buf: [256]u8 = undefined;
+    var buf_writer = std.fs.File.stdout().writer(&stdout_buf);
+    writer = &buf_writer.interface;
 
     const bd = try board.readFen(args.fen);
     if (args.display_board and !args.silent) {
@@ -162,5 +163,4 @@ pub fn main() !void {
             try writer.print("{d} in {d:.9} nps ({d:.9}s)\n", .{score, nps, duration});
         }
     }
-    try buf_writer.flush();
 }
