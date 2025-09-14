@@ -125,6 +125,11 @@ pub const Bot = struct {
         upper,
     };
 
+    const NodeType = enum {
+        Pv,
+        NonPv
+    };
+
     const TTEntry = struct {
         key: u64,
         depth: u8,
@@ -254,10 +259,13 @@ pub const Bot = struct {
         std.mem.sortUnstableContext(0, moves.len, Context { .moves = moves, .scores = scores[0..moves.len] });
     }
 
-    fn quiescenceSearch(self: *Self, root_alpha: i16, beta: i16, ply: u32) !i16 {
+    fn quiescenceSearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, beta: i16, ply: u32) !i16 {
         if (self.timeRemaining() <= TIME_EPS_NS) {
             return error.TimeExpired;
         }
+
+        const is_pv_node = node_type == .Pv;
+        std.debug.assert(is_pv_node or (root_alpha == beta - 1));
 
         const zobrist_key = self.brd.data.zobrist_key;
         const tt_index = zobrist_key & (self.tt.len - 1);
@@ -313,7 +321,7 @@ pub const Bot = struct {
         for (moves.moves()) |move| {
             std.debug.assert(move.is_capture);
             self.brd.makeMove(move);
-            const move_score = -try self.quiescenceSearch(-beta, -alpha, ply+1);
+            const move_score = -try self.quiescenceSearch(node_type, -beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
             if (move_score >= beta) {
@@ -368,10 +376,13 @@ pub const Bot = struct {
         pv[0] = move;
     }
 
-    fn search(self: *Self, root_alpha: i16, beta: i16, remaining_depth: u32, ply: u32) !i16 {
+    fn search(self: *Self, comptime node_type: NodeType, root_alpha: i16, beta: i16, remaining_depth: u32, ply: u32) !i16 {
         if (self.timeRemaining() <= TIME_EPS_NS) {
             return error.TimeExpired;
         }
+
+        const is_pv_node = node_type == .Pv;
+        std.debug.assert(is_pv_node or (root_alpha == beta - 1));
 
         const zobrist_key = self.brd.data.zobrist_key;
         const tt_index = zobrist_key & (self.tt.len - 1);
@@ -400,19 +411,20 @@ pub const Bot = struct {
             return 0;
         }
 
-        const static_eval = try self.quiescenceSearch(root_alpha, beta, ply);
+        const static_eval = try self.quiescenceSearch(node_type, root_alpha, beta, ply);
         var score = -SCORE_INFINITY;
         var alpha = root_alpha;
 
         // TODO fix not-seeing-mate-in-1-move problem with this
-        // if (ply > 0) {
+        // if (!is_pv_node) {
+        //     const margin = @as(i16, @intCast(150 * remaining_depth));
         //     score = static_eval;
-        //     if (static_eval >= beta) {
+        //     if (static_eval >= beta + margin) {
         //         self.stats.beta_cutoffs += 1;
         //         return static_eval;
         //     }
-        //     if (static_eval > alpha) {
-        //         alpha = static_eval;
+        //     if (static_eval - margin > alpha) {
+        //         alpha = static_eval - margin;
         //     }
         // }
 
@@ -437,19 +449,29 @@ pub const Bot = struct {
         var best_move: Move = Move.NULL;
         var tt_bound: Bound = .upper;
 
+        const moves_len = moves.moves().len;
         for (0.., moves.moves()) |i, move| {
-            const search_depth = if (remaining_depth > 2 and i > 5) @max(remaining_depth * 2 / 3, 2) - 1 else remaining_depth - 1;
-
             self.brd.makeMove(move);
+            // TODO improve on that, still bad
+            const search_depth = @min(@max(remaining_depth * 4 / 5 + 1 -| @as(u32, @intCast(i * 8 / moves_len)) / 4, 2), remaining_depth) - 1;
+
+            // TODO more extensions, limit on total extended depth count
+            var search_ext: u32 = 0;
+            if (self.brd.isInCheck()) {
+                search_ext += 1;
+            }
+            if (move.is_promotion) {
+                search_ext += 1;
+            }
             
             // TODO figure out LMR-stuff (for now random values)
             var move_score: i16 = 0;
-            if (remaining_depth < 2 or i < 5) {
-                move_score = -try self.search(-beta, -alpha, remaining_depth - 1, ply + 1);
+            if (remaining_depth < 2 or i < 3) {
+                move_score = -try self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1);
             } else {
-                move_score = -try self.search(-(alpha+1), -alpha, search_depth, ply + 1);
-                if (move_score > alpha) {
-                    move_score = -try self.search(-beta, -alpha, search_depth, ply + 1);
+                move_score = -try self.search(.NonPv, -(alpha+1), -alpha, search_depth + search_ext, ply + 1);
+                if (move_score > alpha and is_pv_node) {
+                    move_score = -try self.search(.Pv, -beta, -alpha, search_depth + search_ext, ply + 1);
                 }
             }
             self.brd.unmakeMove();
@@ -467,7 +489,11 @@ pub const Bot = struct {
 
             if (move_score > score) {
                 score = move_score;
-                self.setNewPvMoveAtPly(move, ply);
+
+                if (is_pv_node) {
+                    self.setNewPvMoveAtPly(move, ply);
+                }
+
                 best_move = move;
                 if (score > alpha) { 
                     alpha = score;
@@ -519,13 +545,12 @@ pub const Bot = struct {
             // ebf 1.5 is probably too optimistic even for strong engine
             // (assuming search time ratios ~ ebf)
             if (d != 1 and last_iteration_time * 3 / 2 > time_remaining) {
-                std.debug.print("time left: {}\n", .{time_remaining});
                 break;
             }
 
             const search_iteration_beg = std.time.Instant.now() catch unreachable;
             var is_time_over = false;
-            if (self.search(-SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0)) |s| { 
+            if (self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0)) |s| { 
                 score = s; 
             } else |err| {
                 if (err == error.TimeExpired) {
