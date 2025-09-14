@@ -118,11 +118,18 @@ pub const Bot = struct {
         killers: [2]Move,
     };
 
+    const Bound = enum {
+        lower,
+        exact,
+        upper,
+    };
+
     const TTEntry = struct {
         key: u64,
         depth: u8,
         score: i16,
         move: Move,
+        bound: Bound,
     };
 
     const Self = @This();
@@ -247,6 +254,22 @@ pub const Bot = struct {
     }
 
     fn quiescenceSearch(self: *Self, root_alpha: i16, beta: i16, ply: u32) i16 {
+        const zobrist_key = self.brd.data.zobrist_key;
+        const tt_index = zobrist_key & (self.tt.len - 1);
+        const tt_entry = &self.tt[tt_index];
+        var tt_move: ?Move = null;
+
+        if (tt_entry.key == zobrist_key) {
+            self.stats.tt_hits += 1;
+            if (tt_entry.bound == .exact or tt_entry.score >= beta and tt_entry.bound == .lower or tt_entry.score < root_alpha and tt_entry.bound == .upper) {
+                return tt_entry.score;
+            }
+
+            tt_move = tt_entry.move;
+        } else {
+            self.stats.tt_misses += 1;
+        }
+
         const static_eval = self.eval();
         var score = static_eval;
         var alpha = root_alpha;
@@ -278,6 +301,10 @@ pub const Bot = struct {
         
         self.orderMoves(moves.moves(), ply, null);
 
+        // technically can be a refutation move
+        var best_move: Move = Move.NULL;
+        var tt_bound: Bound = .upper;
+
         for (moves.moves()) |move| {
             std.debug.assert(move.is_capture);
             self.brd.makeMove(move);
@@ -286,16 +313,30 @@ pub const Bot = struct {
 
             if (move_score >= beta) {
                 self.stats.beta_cutoffs += 1;
+                tt_bound = .lower;
+                best_move = move;
                 return move_score;
             }
 
             if (move_score > score) {
                 // TODO update pv?
                 score = move_score;
+                best_move = move;
                 if (score > alpha) { 
                     alpha = score;
+                    tt_bound = .exact;
                 }
             }
+        }
+
+        if (tt_entry.key != zobrist_key or tt_entry.depth == 0) {
+            tt_entry.* = .{
+                .move = best_move,
+                .score = score,
+                .depth = 0,
+                .key = zobrist_key,
+                .bound = tt_bound,
+            };
         }
 
         return score;
@@ -325,19 +366,22 @@ pub const Bot = struct {
     fn search(self: *Self, root_alpha: i16, beta: i16, remaining_depth: u32, ply: u32) i16 {
         const zobrist_key = self.brd.data.zobrist_key;
         const tt_index = zobrist_key & (self.tt.len - 1);
+        const tt_entry = &self.tt[tt_index];
         var tt_move: ?Move = null;
 
         self.stats.nodes_all += 1;
 
         @memset(self.perPlyPv(ply), Move.NULL);
 
-        if (self.tt[tt_index].key == zobrist_key) {
+        if (tt_entry.key == zobrist_key) {
             self.stats.tt_hits += 1;
-            // TODO better TT
-            // if (self.tt[tt_index].depth >= remaining_depth and ply > 0) {
-            //     return self.tt[tt_index].score;
-            // }
-            tt_move = self.tt[tt_index].move;
+            if (tt_entry.depth >= remaining_depth and ply > 0) {
+                if (tt_entry.bound == .exact or tt_entry.score >= beta and tt_entry.bound == .lower or tt_entry.score < root_alpha and tt_entry.bound == .upper) {
+                    return tt_entry.score;
+                }
+            }
+
+            tt_move = tt_entry.move;
         } else {
             self.stats.tt_misses += 1;
         }
@@ -380,7 +424,10 @@ pub const Bot = struct {
 
         self.orderMoves(moves.moves(), ply, tt_move);
 
+        // technically can be a refutation move
         var best_move: Move = Move.NULL;
+        var tt_bound: Bound = .upper;
+
         for (0.., moves.moves()) |i, move| {
             const search_depth = if (remaining_depth > 2 and i > 5) @max(remaining_depth * 2 / 3, 2) - 1 else remaining_depth - 1;
 
@@ -405,6 +452,7 @@ pub const Bot = struct {
                 self.stats.beta_cutoffs += 1;
                 score = move_score;
                 best_move = move;
+                tt_bound = .lower;
                 break;
             }
 
@@ -414,17 +462,20 @@ pub const Bot = struct {
                 best_move = move;
                 if (score > alpha) { 
                     alpha = score;
+                    tt_bound = .exact;
                 }
             }
         }
-        
-        // TODO verify that depth < 
-        self.tt[tt_index] = .{
-            .move = best_move,
-            .score = score,
-            .depth = @intCast(remaining_depth),
-            .key = zobrist_key,
-        };
+
+        if (tt_entry.key != zobrist_key or tt_entry.depth <= remaining_depth) {
+            tt_entry.* = .{
+                .move = best_move,
+                .score = score,
+                .depth = @intCast(remaining_depth),
+                .key = zobrist_key,
+                .bound = tt_bound,
+            };
+        }
 
         return score;
     }

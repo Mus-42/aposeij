@@ -110,7 +110,7 @@ pub fn main() !void {
             //         // TODO
             //     } else break;
             // }
-            const best_move = b.bestMove(&stdout.interface, .{ .to_depth = .{ .target = 6 } });
+            const best_move = b.bestMove(&stdout.interface, .{ .to_depth = .{ .target = 8 } });
             try stdout.interface.print("bestmove {s}\n", .{best_move.algebraicNotation().toStr()});
         } else if (std.mem.eql(u8, command, "ponderhit")) {
             continue;
