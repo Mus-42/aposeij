@@ -100,17 +100,59 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, command, "isready")) {
             try stdout.interface.writeAll("readyok\n");
         } else if (std.mem.eql(u8, command, "go")) {
-            // TODO
-            // var depth: ?u32 = null;
-            // var time: ?u32 = null;
-            // while (command_parts.next()) |cmd| {
-            //     if (std.mem.eql(u8, cmd, "infinite")) {
-            //         // TODO
-            //     } else if (std.mem.eql(u8, cmd, "depth")) {
-            //         // TODO
-            //     } else break;
-            // }
-            const best_move = b.bestMove(&stdout.interface, .{ .to_depth = .{ .target = 8 } });
+            var go_depth: ?u32 = null;
+            var wtime: ?u32 = null;
+            var btime: ?u32 = null;
+            var winc: ?u32 = null;
+            var binc: ?u32 = null;
+            var movetime: ?u32 = null;
+            var infinite = false;
+
+            while (command_parts.next()) |cmd| {
+                if (std.mem.eql(u8, cmd, "infinite")) {
+                    infinite = true;
+                } else if (std.mem.eql(u8, cmd, "depth")) {
+                    const depth_str = command_parts.next() orelse break;
+                    go_depth = std.fmt.parseInt(u32, depth_str, 10) catch continue;
+                } else if (std.mem.eql(u8, cmd, "wtime")) {
+                    const wtime_str = command_parts.next() orelse break;
+                    wtime = std.fmt.parseInt(u32, wtime_str, 10) catch continue;
+                } else if (std.mem.eql(u8, cmd, "btime")) {
+                    const btime_str = command_parts.next() orelse break;
+                    btime = std.fmt.parseInt(u32, btime_str, 10) catch continue;
+                } else if (std.mem.eql(u8, cmd, "winc")) {
+                    const winc_str = command_parts.next() orelse break;
+                    winc = std.fmt.parseInt(u32, winc_str, 10) catch continue;
+                } else if (std.mem.eql(u8, cmd, "binc")) {
+                    const binc_str = command_parts.next() orelse break;
+                    binc = std.fmt.parseInt(u32, binc_str, 10) catch continue;
+                } else if (std.mem.eql(u8, cmd, "movetime")) {
+                    const movetime_str = command_parts.next() orelse break;
+                    movetime = std.fmt.parseInt(u32, movetime_str, 10) catch continue;
+                } else break;
+            }
+
+            var time_controls: bot.TimeControls = .{ .to_depth = .{ .target = 8 } };
+
+            if (infinite) {
+                time_controls = .infinite;
+            } else if (go_depth) |depth| {
+                time_controls = .{ .to_depth = .{ .target = depth } };
+            } else if (movetime) |time| {
+                time_controls = .{ .time_remaining = .{ .ns = std.time.ns_per_ms * @as(u64, time) } };
+            } else {
+                const side_to_move = brd.data.side_to_move;
+                if (side_to_move == .white and wtime != null) {
+                    const time_ns = std.time.ns_per_ms * @as(u64, wtime.?) / 20 + std.time.ns_per_ms * @as(u64, winc orelse 0) / 2;
+                    time_controls = .{ .time_remaining = .{ .ns = time_ns } };
+                }
+                if (side_to_move == .black and btime != null) {
+                    const time_ns = std.time.ns_per_ms * @as(u64, btime.?) / 20 + std.time.ns_per_ms * @as(u64, binc orelse 0) / 2;
+                    time_controls = .{ .time_remaining = .{ .ns = time_ns } };
+                }
+            }
+
+            const best_move = b.bestMove(&stdout.interface, time_controls);
             try stdout.interface.print("bestmove {s}\n", .{best_move.algebraicNotation().toStr()});
         } else if (std.mem.eql(u8, command, "ponderhit")) {
             continue;

@@ -13,6 +13,8 @@ pub const SCORE_MATE_ABS: i16 = 32000;
 pub const SCORE_MATE_EPS: i16 = MAX_DEPTH;
 pub const SCORE_INFINITY: i16 = SCORE_MATE_ABS+1;
 
+pub const TIME_EPS_NS: u64 = 200;
+
 const PIECE_COST = [6]i16{
     100,
     320,
@@ -110,9 +112,8 @@ pub const Bot = struct {
     per_ply: [MAX_DEPTH]PerPly = undefined,
     tt: []TTEntry,
     stats: Stats = .{},
-    is_time_over: bool = false,
     search_start: std.time.Instant = undefined,
-    max_search_time_ns: u64 = undefined,
+    available_time: u64 = 0,
 
     const PerPly = struct {
         killers: [2]Move,
@@ -253,7 +254,11 @@ pub const Bot = struct {
         std.mem.sortUnstableContext(0, moves.len, Context { .moves = moves, .scores = scores[0..moves.len] });
     }
 
-    fn quiescenceSearch(self: *Self, root_alpha: i16, beta: i16, ply: u32) i16 {
+    fn quiescenceSearch(self: *Self, root_alpha: i16, beta: i16, ply: u32) !i16 {
+        if (self.timeRemaining() <= TIME_EPS_NS) {
+            return error.TimeExpired;
+        }
+
         const zobrist_key = self.brd.data.zobrist_key;
         const tt_index = zobrist_key & (self.tt.len - 1);
         const tt_entry = &self.tt[tt_index];
@@ -308,7 +313,7 @@ pub const Bot = struct {
         for (moves.moves()) |move| {
             std.debug.assert(move.is_capture);
             self.brd.makeMove(move);
-            const move_score = -self.quiescenceSearch(-beta, -alpha, ply+1);
+            const move_score = -try self.quiescenceSearch(-beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
             if (move_score >= beta) {
@@ -363,7 +368,11 @@ pub const Bot = struct {
         pv[0] = move;
     }
 
-    fn search(self: *Self, root_alpha: i16, beta: i16, remaining_depth: u32, ply: u32) i16 {
+    fn search(self: *Self, root_alpha: i16, beta: i16, remaining_depth: u32, ply: u32) !i16 {
+        if (self.timeRemaining() <= TIME_EPS_NS) {
+            return error.TimeExpired;
+        }
+
         const zobrist_key = self.brd.data.zobrist_key;
         const tt_index = zobrist_key & (self.tt.len - 1);
         const tt_entry = &self.tt[tt_index];
@@ -391,7 +400,7 @@ pub const Bot = struct {
             return 0;
         }
 
-        const static_eval = self.quiescenceSearch(root_alpha, beta, ply);
+        const static_eval = try self.quiescenceSearch(root_alpha, beta, ply);
         var score = -SCORE_INFINITY;
         var alpha = root_alpha;
 
@@ -436,11 +445,11 @@ pub const Bot = struct {
             // TODO figure out LMR-stuff (for now random values)
             var move_score: i16 = 0;
             if (remaining_depth < 2 or i < 5) {
-                move_score = -self.search(-beta, -alpha, remaining_depth - 1, ply + 1);
+                move_score = -try self.search(-beta, -alpha, remaining_depth - 1, ply + 1);
             } else {
-                move_score = -self.search(-(alpha+1), -alpha, search_depth, ply + 1);
+                move_score = -try self.search(-(alpha+1), -alpha, search_depth, ply + 1);
                 if (move_score > alpha) {
-                    move_score = -self.search(-beta, -alpha, search_depth, ply + 1);
+                    move_score = -try self.search(-beta, -alpha, search_depth, ply + 1);
                 }
             }
             self.brd.unmakeMove();
@@ -480,27 +489,59 @@ pub const Bot = struct {
         return score;
     }
 
+    pub fn timeRemaining(self: *Self) u64 {
+        const now = std.time.Instant.now() catch unreachable;
+        return self.available_time -| now.since(self.search_start);
+    }
+
     pub fn bestMove(self: *Self, uci_writer: *std.io.Writer, time_controls: TimeControls) Move {
         var depth_target: u32 = MAX_DEPTH;
-        var max_thinking_time: u64 = MAX_THINKING_TIME_NS;
+        var available_time: u64 = MAX_THINKING_TIME_NS;
 
         switch (time_controls) {
             .infinite => {},
             .to_depth => |c| depth_target = @min(depth_target, c.target),
-            .time_remaining => |c| {
-                // TODO
-                max_thinking_time = @min(max_thinking_time, c.ns);
-            },
+            .time_remaining => |c| available_time = @min(available_time, c.ns),
         }
         
+        self.available_time = available_time;
         self.search_start = std.time.Instant.now() catch unreachable;
-        self.is_time_over = false;
     
         var score: i32 = 0;
+        var best_move: Move = .NULL;
+        var last_iteration_time: u64 = 0;
+
         for (1..depth_target+1) |d| {
             self.preSearchCleanup();
-            score = self.search(-SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0);
-            uci_writer.print("info depth {d} score cp {} pv", .{d, score}) catch {};
+
+            const time_remaining = self.timeRemaining();
+            // TODO increase branching factor estimate?
+            // ebf 1.5 is probably too optimistic even for strong engine
+            // (assuming search time ratios ~ ebf)
+            if (d != 1 and last_iteration_time * 3 / 2 > time_remaining) {
+                std.debug.print("time left: {}\n", .{time_remaining});
+                break;
+            }
+
+            const search_iteration_beg = std.time.Instant.now() catch unreachable;
+            var is_time_over = false;
+            if (self.search(-SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0)) |s| { 
+                score = s; 
+            } else |err| {
+                if (err == error.TimeExpired) {
+                    is_time_over = true;
+                }
+            }
+
+            const search_iteration_end = std.time.Instant.now() catch unreachable;
+            const iteration_time = search_iteration_end.since(search_iteration_beg);
+            last_iteration_time = iteration_time;
+
+            if (d == 1 or !is_time_over) {
+                best_move = self.perPlyPv(0)[0];
+            }
+
+            uci_writer.print("info depth {d} score cp {} time {} pv", .{d, score, iteration_time / std.time.ns_per_ms}) catch {};
             for (self.perPlyPv(0)) |move| {
                 if (move == Move.NULL) break;
                 uci_writer.print(" {s}", .{move.algebraicNotation().toStr()}) catch {};
@@ -508,8 +549,11 @@ pub const Bot = struct {
             uci_writer.print("\n", .{}) catch {};
             uci_writer.print("info string {any}\n", .{self.stats}) catch {};
             uci_writer.flush() catch {};
+
+            if (is_time_over) {
+                break;
+            }
         }
-        const best_move = self.pv_moves[0];
         std.debug.assert(best_move != Move.NULL);
 
 
