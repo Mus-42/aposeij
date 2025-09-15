@@ -8,6 +8,7 @@ const Board = board.Board;
 
 pub const MAX_DEPTH = 128;
 pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_s; 
+pub const MAX_EXTENSIONS = 8;
 
 pub const SCORE_MATE_ABS: i16 = 32000;
 pub const SCORE_MATE_EPS: i16 = MAX_DEPTH;
@@ -284,6 +285,11 @@ pub const Bot = struct {
         }
 
         const static_eval = self.eval();
+
+        // TODO make something about that?
+        if (ply == MAX_DEPTH)
+            return static_eval;
+
         var score = static_eval;
         var alpha = root_alpha;
 
@@ -376,7 +382,15 @@ pub const Bot = struct {
         pv[0] = move;
     }
 
-    fn search(self: *Self, comptime node_type: NodeType, root_alpha: i16, beta: i16, remaining_depth: u32, ply: u32) !i16 {
+    fn search(
+        self: *Self,
+        comptime node_type: NodeType,
+        root_alpha: i16,
+        beta: i16,
+        remaining_depth: u32,
+        ply: u32,
+        extensions_used: u32,
+    ) !i16 {
         if (self.timeRemaining() <= TIME_EPS_NS) {
             return error.TimeExpired;
         }
@@ -412,6 +426,11 @@ pub const Bot = struct {
         }
 
         const static_eval = try self.quiescenceSearch(node_type, root_alpha, beta, ply);
+
+        // TODO make something about that?
+        if (ply == MAX_DEPTH)
+            return static_eval;
+
         var score = -SCORE_INFINITY;
         var alpha = root_alpha;
 
@@ -453,25 +472,33 @@ pub const Bot = struct {
         for (0.., moves.moves()) |i, move| {
             self.brd.makeMove(move);
             // TODO improve on that, still bad
-            const search_depth = @min(@max(remaining_depth * 4 / 5 + 1 -| @as(u32, @intCast(i * 8 / moves_len)) / 4, 2), remaining_depth) - 1;
-
+            var search_depth = remaining_depth * 4 / 5 + 1 -| @as(u32, @intCast(i * 8 / moves_len)) / 4;
+            search_depth = @max(search_depth, 2);
+            search_depth = @min(search_depth, remaining_depth);
+            search_depth -= 1;
             // TODO more extensions, limit on total extended depth count
+           
             var search_ext: u32 = 0;
             if (self.brd.isInCheck()) {
                 search_ext += 1;
             }
-            if (move.is_promotion) {
+            if (move.is_promotion and move.extra.promotion == .queen) {
                 search_ext += 1;
             }
+            if (moves_len == 1) {
+                search_ext += 1;
+            }
+            search_ext = @min(search_ext + extensions_used, MAX_EXTENSIONS) - extensions_used;
+            
             
             // TODO figure out LMR-stuff (for now random values)
             var move_score: i16 = 0;
             if (remaining_depth < 2 or i < 3) {
-                move_score = -try self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1);
+                move_score = -try self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext);
             } else {
-                move_score = -try self.search(.NonPv, -(alpha+1), -alpha, search_depth + search_ext, ply + 1);
+                move_score = -try self.search(.NonPv, -(alpha+1), -alpha, search_depth + search_ext, ply + 1, extensions_used + search_ext);
                 if (move_score > alpha and is_pv_node) {
-                    move_score = -try self.search(.Pv, -beta, -alpha, search_depth + search_ext, ply + 1);
+                    move_score = -try self.search(.Pv, -beta, -alpha, search_depth + search_ext, ply + 1, extensions_used + search_ext);
                 }
             }
             self.brd.unmakeMove();
@@ -541,16 +568,14 @@ pub const Bot = struct {
             self.preSearchCleanup();
 
             const time_remaining = self.timeRemaining();
-            // TODO increase branching factor estimate?
-            // ebf 1.5 is probably too optimistic even for strong engine
-            // (assuming search time ratios ~ ebf)
-            if (d != 1 and last_iteration_time * 3 / 2 > time_remaining) {
+            // TODO better branching factor estimate?
+            if (d != 1 and last_iteration_time * 3 > time_remaining) {
                 break;
             }
 
             const search_iteration_beg = std.time.Instant.now() catch unreachable;
             var is_time_over = false;
-            if (self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0)) |s| { 
+            if (self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0, 0)) |s| {
                 score = s; 
             } else |err| {
                 if (err == error.TimeExpired) {
