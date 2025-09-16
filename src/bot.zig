@@ -106,15 +106,51 @@ pub const TimeControls = union (enum) {
     to_depth: struct { target: u32 },
 };
 
+
+pub fn ButterflyBoard(comptime Counter: type) type {
+    return struct {
+        // TODO somehow avoid wasting most of the memory on impossible moves
+        counters: [2 * 64 * 64]Counter,
+
+        const Self = @This();
+
+        pub fn index(color: board.SideToMove, move: Move) usize {
+            return @as(usize, @intFromEnum(color)) << 12 | @as(usize, move.from) << 6 | @as(usize, move.to) << 6;
+        }
+
+        pub fn setToZero(self: *Self) void {
+            @memset(&self.counters, 0);
+        }
+
+        pub fn get(self: *const Self, color: board.SideToMove, move: Move) Counter {
+            const i = index(color, move);
+            return self.counters[i];
+        }
+
+        pub fn set(self: *Self, color: board.SideToMove, move: Move, count: Counter) void {
+            const i = index(color, move);
+            self.counters[i] = count;
+        }
+
+        pub fn add(self: *Self, color: board.SideToMove, move: Move, count: Counter) void {
+            const i = index(color, move);
+            self.counters[i] +|= count;
+        }
+    };
+}
+
 pub const Bot = struct {
     alloc: Alloc,
     brd: *Board,
     pv_moves: []Move,
-    per_ply: [MAX_DEPTH]PerPly = undefined,
     tt: []TTEntry,
+    per_ply: *[MAX_DEPTH]PerPly,
+    history: *History,
     stats: Stats = .{},
     search_start: std.time.Instant = undefined,
     available_time: u64 = 0,
+
+    const History = ButterflyBoard(i16);
 
     const PerPly = struct {
         killers: [2]Move,
@@ -144,17 +180,24 @@ pub const Bot = struct {
     pub fn init(alloc: Alloc, brd: *Board) !Self {
         const tt = try alloc.alloc(TTEntry, TT_SIZE);
         const pv_moves = try alloc.alloc(Move, MAX_DEPTH * (MAX_DEPTH + 1) / 2);
+        const per_ply = try alloc.create([MAX_DEPTH]PerPly);
+        const history = try alloc.create(History);
+
         return .{
             .alloc = alloc,
             .brd = brd,
             .pv_moves = pv_moves,
             .tt = tt,
+            .per_ply = per_ply,
+            .history = history,
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.alloc.free(self.tt);
         self.alloc.free(self.pv_moves);
+        self.alloc.destroy(self.per_ply);
+        self.alloc.destroy(self.history);
     }
 
     pub fn whiteEval(bd: Board.BoardData) i16 {
@@ -210,17 +253,23 @@ pub const Bot = struct {
         if (tt_move == move) {
             score += 2000;
         }
-        // TODO pv move?
-        // if (self.per_ply[ply].pv_move == move) {
-        //     score += 1000;
-        // }
+
+        if (self.perPlyPv(ply)[0] == move) {
+            score += 50;
+        }
 
         if (self.per_ply[ply].killers[0] == move or self.per_ply[ply].killers[1] == move) {
-            score += 800;
+            score += 100;
         }
-        if (move.is_promotion and move.extra.promotion == .queen) {
-            score += 200;
+
+        if (move.is_promotion) {
+            if (move.extra.promotion == .queen) {
+                score += 100;
+            } else {
+                score -= 100;
+            }
         }
+
         if (move.is_capture) {
             score += 10;
 
@@ -236,16 +285,29 @@ pub const Bot = struct {
             score += cost_to;
         }
 
+
         return score;
     }
 
     fn orderMoves(self: *Self, moves: []Move, ply: u32, tt_move: ?Move) void {
         const Context = struct {
+            bot: *Self,
             moves: []Move,
             scores: []i32,
 
             pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-                return ctx.scores[a] > ctx.scores[b];
+                if (ctx.scores[a] != ctx.scores[b]) {
+                    return ctx.scores[a] > ctx.scores[b];
+                }
+
+                if (!ctx.moves[a].is_capture and !ctx.moves[b].is_capture) {
+                    const color = ctx.bot.brd.data.side_to_move;
+                    const a_score = ctx.bot.history.get(color, ctx.moves[a]);
+                    const b_score = ctx.bot.history.get(color, ctx.moves[b]);
+                    return a_score > b_score;
+                }
+
+                return false;
             }
 
             pub fn swap(ctx: @This(), a: usize, b: usize) void {
@@ -257,7 +319,7 @@ pub const Bot = struct {
         for (0..moves.len) |i| {
             scores[i] = self.scoreMove(moves[i], ply, tt_move);
         }
-        std.mem.sortUnstableContext(0, moves.len, Context { .moves = moves, .scores = scores[0..moves.len] });
+        std.mem.sortUnstableContext(0, moves.len, Context { .bot = self, .moves = moves, .scores = scores[0..moves.len] });
     }
 
     fn quiescenceSearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, beta: i16, ply: u32) !i16 {
@@ -347,7 +409,7 @@ pub const Bot = struct {
                 }
             }
         }
-
+        
         if (tt_entry.key != zobrist_key or tt_entry.depth == 0) {
             tt_entry.* = .{
                 .move = best_move,
@@ -434,18 +496,16 @@ pub const Bot = struct {
         var score = -SCORE_INFINITY;
         var alpha = root_alpha;
 
-        // TODO fix not-seeing-mate-in-1-move problem with this
-        // if (!is_pv_node) {
-        //     const margin = @as(i16, @intCast(150 * remaining_depth));
-        //     score = static_eval;
-        //     if (static_eval >= beta + margin) {
-        //         self.stats.beta_cutoffs += 1;
-        //         return static_eval;
-        //     }
-        //     if (static_eval - margin > alpha) {
-        //         alpha = static_eval - margin;
-        //     }
-        // }
+        if (!is_pv_node and !self.brd.isInCheck() and @abs(alpha) < 2000) {
+            const margin = @as(i16, @intCast(150 * remaining_depth));
+            if (static_eval >= beta + margin ) {
+                self.stats.beta_cutoffs += 1;
+                return static_eval;
+            }
+            if (static_eval - margin > alpha) {
+                alpha = static_eval - margin;
+            }
+        }
 
         if (remaining_depth == 0) {
             self.stats.nodes_leaf += 1;
@@ -529,6 +589,17 @@ pub const Bot = struct {
             }
         }
 
+        if (best_move != Move.NULL and !best_move.is_capture) {
+            const color = self.brd.data.side_to_move;
+            const bonus: i16 = @intCast(remaining_depth * remaining_depth);
+            self.history.add(color, best_move, bonus);
+            for (moves.moves()) |move| {
+                if (move.is_capture) continue;
+                if (move == best_move) break;
+                self.history.add(color, move, -bonus);
+            }
+        }
+
         if (tt_entry.key != zobrist_key or tt_entry.depth <= remaining_depth) {
             tt_entry.* = .{
                 .move = best_move,
@@ -560,6 +631,8 @@ pub const Bot = struct {
         self.available_time = available_time;
         self.search_start = std.time.Instant.now() catch unreachable;
     
+        self.history.setToZero();
+
         var score: i32 = 0;
         var best_move: Move = .NULL;
         var last_iteration_time: u64 = 0;
@@ -591,13 +664,16 @@ pub const Bot = struct {
                 best_move = self.perPlyPv(0)[0];
             }
 
-            uci_writer.print("info depth {d} score cp {} time {} pv", .{d, score, iteration_time / std.time.ns_per_ms}) catch {};
+            const time = iteration_time / std.time.ns_per_ms;
+            const nodes = self.stats.nodes_all;
+            const nps = @as(u64, @intCast(@as(u96, self.stats.nodes_all) * std.time.ns_per_s / @max(iteration_time, 1)));
+            uci_writer.print("info depth {d} score cp {} nodes {} nps {} time {} pv", .{d, score, nodes, nps, time}) catch {};
             for (self.perPlyPv(0)) |move| {
                 if (move == Move.NULL) break;
                 uci_writer.print(" {s}", .{move.algebraicNotation().toStr()}) catch {};
             }
             uci_writer.print("\n", .{}) catch {};
-            uci_writer.print("info string {any}\n", .{self.stats}) catch {};
+            //uci_writer.print("info string {any}\n", .{self.stats}) catch {};
             uci_writer.flush() catch {};
 
             if (is_time_over) {
