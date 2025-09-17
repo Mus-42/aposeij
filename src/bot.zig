@@ -149,6 +149,7 @@ pub const Bot = struct {
     stats: Stats = .{},
     search_start: std.time.Instant = undefined,
     available_time: u64 = 0,
+    allow_search_cancellation: bool = false,
 
     const History = ButterflyBoard(i16);
 
@@ -239,6 +240,7 @@ pub const Bot = struct {
 
     fn preSearchCleanup(self: *Self) void {
         self.stats = .{};
+        @memset(self.perPlyPv(0), Move.NULL);
     }
 
     // order:
@@ -323,9 +325,13 @@ pub const Bot = struct {
     }
 
     fn quiescenceSearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, beta: i16, ply: u32) !i16 {
-        if (self.timeRemaining() <= TIME_EPS_NS) {
+        if (self.allow_search_cancellation and self.timeRemaining() <= TIME_EPS_NS) {
             return error.TimeExpired;
         }
+
+        const pos_repetitions = self.brd.repetitionsCount();
+        if (pos_repetitions > 0 or self.brd.isDraw50Moves())
+            return 0;
 
         const is_pv_node = node_type == .Pv;
         std.debug.assert(is_pv_node or (root_alpha == beta - 1));
@@ -366,8 +372,7 @@ pub const Bot = struct {
         var moves = board.Moves{};
         board.genMoves(self.brd.data, &moves);
 
-        const pos_repetitions = self.brd.repetitionsCount();
-        if (moves.count() == 0 or pos_repetitions > 2) {
+        if (moves.count() == 0) {
             if (self.brd.isInCheck()) {
                 return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
             }
@@ -453,12 +458,21 @@ pub const Bot = struct {
         ply: u32,
         extensions_used: u32,
     ) !i16 {
-        if (self.timeRemaining() <= TIME_EPS_NS) {
+        if (self.allow_search_cancellation and self.timeRemaining() <= TIME_EPS_NS) {
             return error.TimeExpired;
         }
-
+        
         const is_pv_node = node_type == .Pv;
         std.debug.assert(is_pv_node or (root_alpha == beta - 1));
+
+        if (is_pv_node) {
+            @memset(self.perPlyPv(ply), Move.NULL);
+        }
+
+        const pos_repetitions = self.brd.repetitionsCount();
+        if ((pos_repetitions > 0 or self.brd.isDraw50Moves()) and ply > 0)
+            return 0;
+
 
         const zobrist_key = self.brd.data.zobrist_key;
         const tt_index = zobrist_key & (self.tt.len - 1);
@@ -467,7 +481,6 @@ pub const Bot = struct {
 
         self.stats.nodes_all += 1;
 
-        @memset(self.perPlyPv(ply), Move.NULL);
 
         if (tt_entry.key == zobrist_key) {
             self.stats.tt_hits += 1;
@@ -480,11 +493,6 @@ pub const Bot = struct {
             tt_move = tt_entry.move;
         } else {
             self.stats.tt_misses += 1;
-        }
-
-        const pos_repetitions = self.brd.repetitionsCount();
-        if (pos_repetitions > 0 and ply > 0) {
-            return 0;
         }
 
         const static_eval = try self.quiescenceSearch(node_type, root_alpha, beta, ply);
@@ -630,7 +638,9 @@ pub const Bot = struct {
         
         self.available_time = available_time;
         self.search_start = std.time.Instant.now() catch unreachable;
-    
+        
+        // make full search at least to depth 1 to have move to play
+        self.allow_search_cancellation = false;
         self.history.setToZero();
 
         var score: i32 = 0;
@@ -655,6 +665,8 @@ pub const Bot = struct {
                     is_time_over = true;
                 }
             }
+
+            self.allow_search_cancellation = true;
 
             const search_iteration_end = std.time.Instant.now() catch unreachable;
             const iteration_time = search_iteration_end.since(search_iteration_beg);

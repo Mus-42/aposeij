@@ -171,6 +171,7 @@ pub fn main() !void {
         } else {
             try stdout.interface.print("unknown command `{s}` found. type `help` to list all available commands\n", .{command});
         }
+
         try stdout.interface.flush();
     }
 

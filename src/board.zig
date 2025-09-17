@@ -132,7 +132,7 @@ pub const Board = struct {
     pub const BoardData = struct {
         pieces: [12]u64,
         fullmoves: u12 = 0,
-        halfmoves50: u6 = 0,
+        halfmoves50: u8 = 0,
         castling_rights: CastlingRights = .{},
         side_to_move: SideToMove = .white,
         en_passant_target: ?Square = null,
@@ -230,8 +230,6 @@ pub const Board = struct {
             .history = history,
         };
     }
-    
-    
 
     pub fn makeMove(self: *Self, move: Move) void {
         self.history.appendAssumeCapacity(.{ .data = self.data, .move = move });
@@ -291,6 +289,10 @@ pub const Board = struct {
             self.data.setPieceAt(move.to, piece);
         }
 
+        if (self.data.side_to_move == .black) {
+            self.data.halfmoves50 += 1;
+        }
+
         if (reset_50_moves_clock) {
             self.data.halfmoves50 = 0;
         }
@@ -326,6 +328,10 @@ pub const Board = struct {
         const attacks = attack_gen.attacks_all;
         const kings = state.pieces[@intFromEnum(PieceKind.w_king)];
         return attacks & kings != 0;
+    }
+
+    pub fn isDraw50Moves(self: *const Self) bool {
+        return self.data.halfmoves50 >= 50;
     }
 
     pub fn setBoardData(self: *Self, bd: BoardData) void {
@@ -453,14 +459,15 @@ pub fn readFen(s: []const u8) FenReadError!Board.BoardData {
 
     const h50 = i;
     while (i < s.len and !std.ascii.isWhitespace(s[i])) i += 1;
-    board.halfmoves50 = std.fmt.parseUnsigned(u6, s[h50..i], 10) catch return error.IncompleteFenData;
+    const halfmoves = std.fmt.parseUnsigned(u8, s[h50..i], 10) catch return error.IncompleteFenData;
+    board.halfmoves50 = halfmoves;
 
     while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
     if (i >= s.len) return error.IncompleteFenData;
 
     const h = i;
     while (i < s.len and !std.ascii.isWhitespace(s[i])) i += 1;
-    board.fullmoves = std.fmt.parseUnsigned(u6, s[h..i], 10) catch return error.IncompleteFenData;
+    board.fullmoves = std.fmt.parseUnsigned(u12, s[h..i], 10) catch return error.IncompleteFenData;
 
     while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
 
