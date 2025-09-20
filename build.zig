@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(perft);
 
     const aposeij_root_module = b.createModule(.{
-        .root_source_file = b.path("src/uci.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{ .{ .name = "board", .module = board } }

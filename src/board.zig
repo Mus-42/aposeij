@@ -231,6 +231,16 @@ pub const Board = struct {
         };
     }
 
+    pub fn deinit(self: *Self) void {
+        self.history.deinit(self.alloc);
+    }
+
+    pub fn cloneFrom(self: *Self, other: *const Self) !void {
+        self.history.clearRetainingCapacity();
+        self.history.appendSliceAssumeCapacity(other.history.items);
+        self.data = other.data;
+    }
+
     pub fn makeMove(self: *Self, move: Move) void {
         self.history.appendAssumeCapacity(.{ .data = self.data, .move = move });
         
@@ -342,10 +352,6 @@ pub const Board = struct {
     
     pub fn clearHistory(self: *Self) void {
         self.history.clearRetainingCapacity();
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.history.deinit(self.alloc);
     }
 
     pub fn debugDumpMoveHistory(self: *const Self) void {

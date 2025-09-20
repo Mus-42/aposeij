@@ -1,5 +1,8 @@
 const std = @import("std");
 const board = @import("board");
+const tt = @import("transposition_table.zig");
+const evaluation = @import("evaluation.zig");
+const uci = @import("uci.zig");
 
 const Alloc = std.mem.Allocator;
 const Move = board.Move;
@@ -10,85 +13,17 @@ pub const MAX_DEPTH = 128;
 pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_s; 
 pub const MAX_EXTENSIONS = 8;
 
+pub const QS_TT_DEPTH = 0;
+
 pub const SCORE_MATE_ABS: i16 = 32000;
 pub const SCORE_MATE_EPS: i16 = MAX_DEPTH;
 pub const SCORE_INFINITY: i16 = SCORE_MATE_ABS+1;
 
 pub const TIME_EPS_NS: u64 = 200;
 
-const PIECE_COST = [6]i16{
-    100,
-    320,
-    330,
-    500,
-    900,
-    0
-};
-
-const TT_SIZE = 1<<22;
-
-const BONUS_TABLES: [6][64]i8 = .{
-    .{
-        0,  0,  0,  0,  0,  0,  0,  0,
-        50, 50, 50, 50, 50, 50, 50, 50,
-        10, 10, 20, 30, 30, 20, 10, 10,
-        5,  5, 10, 25, 25, 10,  5,  5,
-        0,  0,  0, 20, 20,  0,  0,  0,
-        5, -5,-10,  0,  0,-10, -5,  5,
-        5, 10, 10,-20,-20, 10, 10,  5,
-        0,  0,  0,  0,  0,  0,  0,  0
-    },
-    .{
-        -50,-40,-30,-30,-30,-30,-40,-50,
-        -40,-20,  0,  0,  0,  0,-20,-40,
-        -30,  0, 10, 15, 15, 10,  0,-30,
-        -30,  5, 15, 20, 20, 15,  5,-30,
-        -30,  0, 15, 20, 20, 15,  0,-30,
-        -30,  5, 10, 15, 15, 10,  5,-30,
-        -40,-20,  0,  5,  5,  0,-20,-40,
-        -50,-40,-30,-30,-30,-30,-40,-50,
-    },
-    .{
-        -20,-10,-10,-10,-10,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  5, 10, 10,  5,  0,-10,
-        -10,  5,  5, 10, 10,  5,  5,-10,
-        -10,  0, 10, 10, 10, 10,  0,-10,
-        -10, 10, 10, 10, 10, 10, 10,-10,
-        -10,  5,  0,  0,  0,  0,  5,-10,
-        -20,-10,-10,-10,-10,-10,-10,-20,
-
-    },
-    .{
-        0,  0,  0,  0,  0,  0,  0,  0,
-        5, 10, 10, 10, 10, 10, 10,  5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        0,  0,  0,  5,  5,  0,  0,  0
-    },
-    .{
-        -20,-10,-10, -5, -5,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  5,  5,  5,  5,  0,-10,
-        -5,  0,  5,  5,  5,  5,  0, -5,
-        0,  0,  5,  5,  5,  5,  0, -5,
-        -10,  5,  5,  5,  5,  5,  0,-10,
-        -10,  0,  5,  0,  0,  0,  0,-10,
-        -20,-10,-10, -5, -5,-10,-10,-20
-    },
-    .{
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -20,-30,-30,-40,-40,-30,-30,-20,
-        -10,-20,-20,-20,-20,-20,-20,-10,
-        20, 20,  0,  0,  0,  0, 20, 20,
-        20, 30, 10,  0,  0, 10, 30, 20
-    }
+pub const NodeType = enum {
+    Pv,
+    NonPv
 };
 
 pub const Stats = struct {
@@ -105,7 +40,6 @@ pub const TimeControls = union (enum) {
     time_remaining: struct { ns: u64 },
     to_depth: struct { target: u32 },
 };
-
 
 pub fn ButterflyBoard(comptime Counter: type) type {
     return struct {
@@ -139,17 +73,19 @@ pub fn ButterflyBoard(comptime Counter: type) type {
     };
 }
 
-pub const Bot = struct {
+pub const SearchThread = struct {
     alloc: Alloc,
-    brd: *Board,
+    brd: *Board = undefined,
+    tt: tt.TTable,
     pv_moves: []Move,
-    tt: []TTEntry,
     per_ply: *[MAX_DEPTH]PerPly,
     history: *History,
     stats: Stats = .{},
     search_start: std.time.Instant = undefined,
     available_time: u64 = 0,
     allow_search_cancellation: bool = false,
+    // TODO get if from controls
+    is_exiting_search: std.atomic.Value(bool),
 
     const History = ButterflyBoard(i16);
 
@@ -157,80 +93,34 @@ pub const Bot = struct {
         killers: [2]Move,
     };
 
-    const Bound = enum {
-        lower,
-        exact,
-        upper,
-    };
-
-    const NodeType = enum {
-        Pv,
-        NonPv
-    };
-
-    const TTEntry = struct {
-        key: u64,
-        depth: u8,
-        score: i16,
-        move: Move,
-        bound: Bound,
-    };
-
     const Self = @This();
 
-    pub fn init(alloc: Alloc, brd: *Board) !Self {
-        const tt = try alloc.alloc(TTEntry, TT_SIZE);
+    pub fn init(alloc: Alloc) !Self {
         const pv_moves = try alloc.alloc(Move, MAX_DEPTH * (MAX_DEPTH + 1) / 2);
         const per_ply = try alloc.create([MAX_DEPTH]PerPly);
         const history = try alloc.create(History);
+        const ttable = try tt.TTable.init(alloc);
 
         return .{
             .alloc = alloc,
-            .brd = brd,
+            .tt = ttable,
             .pv_moves = pv_moves,
-            .tt = tt,
             .per_ply = per_ply,
             .history = history,
+            .is_exiting_search = .init(false),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.alloc.free(self.tt);
+        self.tt.deinit(self.alloc);
         self.alloc.free(self.pv_moves);
         self.alloc.destroy(self.per_ply);
         self.alloc.destroy(self.history);
     }
 
-    pub fn whiteEval(bd: Board.BoardData) i16 {
-        var score: i16 = 0;
-        // material
-        inline for (0..5) |i| {
-           score += (@as(i16, @popCount(bd.pieces[i])) - @as(i16, @popCount(bd.pieces[i + 6]))) * PIECE_COST[i];
-        }
-
-        inline for (0..6) |i| {
-            var piece: u64 = undefined;
-
-            piece = bd.pieces[i];
-            while (piece != 0) : (piece &= piece - 1) {
-                const pos: u6 = @intCast(@ctz(piece));
-                score += BONUS_TABLES[i][board.sideFlipSquare(pos)];
-            }
-
-            piece = bd.pieces[i+6];
-            while (piece != 0) : (piece &= piece - 1) {
-                const pos: u6 = @intCast(@ctz(piece));
-                score -= BONUS_TABLES[i][pos];
-            }
-        }
-        
-
-        return score;
-    }
-
     pub fn eval(self: *Self) i16 {
         self.stats.evals += 1;
-        const white_score = whiteEval(self.brd.data);
+        const white_score = evaluation.whiteEval(self.brd.data);
         if (self.brd.data.side_to_move == .white) {
             return white_score;
         } else {
@@ -273,20 +163,8 @@ pub const Bot = struct {
         }
 
         if (move.is_capture) {
-            score += 10;
-
-            const from = @intFromEnum(self.brd.data.getPieceAt(move.from).?);
-            const to_square = if (!move.is_promotion and move.extra.capture == .ep_capture) move.to ^ 8 else move.to;
-            const to = @intFromEnum(self.brd.data.getPieceAt(to_square).?);
-
-            const cost_from = if (from < 6) PIECE_COST[from] else PIECE_COST[from - 6];
-            const cost_to = if (to < 6) PIECE_COST[to] else PIECE_COST[to - 6];
-
-            // TODO weight somehow
-            score -= cost_from;
-            score += cost_to;
+            score += 10 + evaluation.captureMoveMaterial(self.brd.data, move);
         }
-
 
         return score;
     }
@@ -325,7 +203,7 @@ pub const Bot = struct {
     }
 
     fn quiescenceSearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, beta: i16, ply: u32) !i16 {
-        if (self.allow_search_cancellation and self.timeRemaining() <= TIME_EPS_NS) {
+        if (self.allow_search_cancellation and (self.is_exiting_search.load(.seq_cst) or self.timeRemaining() <= TIME_EPS_NS)) {
             return error.TimeExpired;
         }
 
@@ -337,11 +215,9 @@ pub const Bot = struct {
         std.debug.assert(is_pv_node or (root_alpha == beta - 1));
 
         const zobrist_key = self.brd.data.zobrist_key;
-        const tt_index = zobrist_key & (self.tt.len - 1);
-        const tt_entry = &self.tt[tt_index];
         var tt_move: ?Move = null;
 
-        if (tt_entry.key == zobrist_key) {
+        if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             self.stats.tt_hits += 1;
             if (tt_entry.bound == .exact or tt_entry.score >= beta and tt_entry.bound == .lower or tt_entry.score < root_alpha and tt_entry.bound == .upper) {
                 return tt_entry.score;
@@ -389,7 +265,7 @@ pub const Bot = struct {
 
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
-        var tt_bound: Bound = .upper;
+        var tt_bound: tt.Bound = .upper;
 
         for (moves.moves()) |move| {
             std.debug.assert(move.is_capture);
@@ -415,15 +291,7 @@ pub const Bot = struct {
             }
         }
         
-        if (tt_entry.key != zobrist_key or tt_entry.depth == 0) {
-            tt_entry.* = .{
-                .move = best_move,
-                .score = score,
-                .depth = 0,
-                .key = zobrist_key,
-                .bound = tt_bound,
-            };
-        }
+        self.tt.put(zobrist_key, ply, QS_TT_DEPTH, score, tt_bound, best_move);
 
         return score;
     }
@@ -458,7 +326,7 @@ pub const Bot = struct {
         ply: u32,
         extensions_used: u32,
     ) !i16 {
-        if (self.allow_search_cancellation and self.timeRemaining() <= TIME_EPS_NS) {
+        if (self.allow_search_cancellation and (self.is_exiting_search.load(.seq_cst) or self.timeRemaining() <= TIME_EPS_NS)) {
             return error.TimeExpired;
         }
         
@@ -473,18 +341,15 @@ pub const Bot = struct {
         if ((pos_repetitions > 0 or self.brd.isDraw50Moves()) and ply > 0)
             return 0;
 
-
-        const zobrist_key = self.brd.data.zobrist_key;
-        const tt_index = zobrist_key & (self.tt.len - 1);
-        const tt_entry = &self.tt[tt_index];
-        var tt_move: ?Move = null;
-
         self.stats.nodes_all += 1;
 
+        const zobrist_key = self.brd.data.zobrist_key;
+        var tt_move: ?Move = null;
 
-        if (tt_entry.key == zobrist_key) {
+        if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             self.stats.tt_hits += 1;
-            if (tt_entry.depth >= remaining_depth and ply > 0) {
+
+            if (tt_entry.depth >= remaining_depth and ply > 0) { 
                 if (tt_entry.bound == .exact or tt_entry.score >= beta and tt_entry.bound == .lower or tt_entry.score < root_alpha and tt_entry.bound == .upper) {
                     return tt_entry.score;
                 }
@@ -534,7 +399,7 @@ pub const Bot = struct {
 
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
-        var tt_bound: Bound = .upper;
+        var tt_bound: tt.Bound = .upper;
 
         const moves_len = moves.moves().len;
         for (0.., moves.moves()) |i, move| {
@@ -608,15 +473,7 @@ pub const Bot = struct {
             }
         }
 
-        if (tt_entry.key != zobrist_key or tt_entry.depth <= remaining_depth) {
-            tt_entry.* = .{
-                .move = best_move,
-                .score = score,
-                .depth = @intCast(remaining_depth),
-                .key = zobrist_key,
-                .bound = tt_bound,
-            };
-        }
+        self.tt.put(zobrist_key, ply, @intCast(remaining_depth), score, tt_bound, best_move);
 
         return score;
     }
@@ -626,7 +483,9 @@ pub const Bot = struct {
         return self.available_time -| now.since(self.search_start);
     }
 
-    pub fn bestMove(self: *Self, uci_writer: *std.io.Writer, time_controls: TimeControls) Move {
+    pub fn bestMove(self: *Self, brd: *Board, uci_connection: *uci.UciConnection, time_controls: TimeControls) !Move {
+        self.brd = brd;
+
         var depth_target: u32 = MAX_DEPTH;
         var available_time: u64 = MAX_THINKING_TIME_NS;
 
@@ -657,14 +516,15 @@ pub const Bot = struct {
             }
 
             const search_iteration_beg = std.time.Instant.now() catch unreachable;
-            var is_time_over = false;
+            var is_search_finished = true;
             if (self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, @intCast(d), 0, 0)) |s| {
                 score = s; 
             } else |err| {
                 if (err == error.TimeExpired) {
-                    is_time_over = true;
+                    is_search_finished = false;
                 }
             }
+            std.debug.assert(d != 1 or is_search_finished);
 
             self.allow_search_cancellation = true;
 
@@ -672,37 +532,107 @@ pub const Bot = struct {
             const iteration_time = search_iteration_end.since(search_iteration_beg);
             last_iteration_time = iteration_time;
 
-            if (d == 1 or !is_time_over) {
+            if (is_search_finished) {
                 best_move = self.perPlyPv(0)[0];
             }
 
-            const time = iteration_time / std.time.ns_per_ms;
-            const nodes = self.stats.nodes_all;
-            const nps = @as(u64, @intCast(@as(u96, self.stats.nodes_all) * std.time.ns_per_s / @max(iteration_time, 1)));
-            uci_writer.print("info depth {d} score cp {} nodes {} nps {} time {} pv", .{d, score, nodes, nps, time}) catch {};
-            for (self.perPlyPv(0)) |move| {
-                if (move == Move.NULL) break;
-                uci_writer.print(" {s}", .{move.algebraicNotation().toStr()}) catch {};
-            }
-            uci_writer.print("\n", .{}) catch {};
-            //uci_writer.print("info string {any}\n", .{self.stats}) catch {};
-            uci_writer.flush() catch {};
+            try uci_connection.searchInfo(.{
+                .depth = @intCast(d),
+                .time_ms = iteration_time / std.time.ns_per_ms,
+                .nodes = self.stats.nodes_all,
+                .nps =  @as(u64, @intCast(@as(u96, self.stats.nodes_all) * std.time.ns_per_s / @max(iteration_time, 1))),
+                .pv = trimInvalidPvMoves(self.perPlyPv(0)),
+                .score = score,
+            }); 
 
-            if (is_time_over) {
+            // time expired | cancellation request
+            if (!is_search_finished) {
                 break;
             }
         }
+
         std.debug.assert(best_move != Move.NULL);
-
-
-        // TODO
-        // if (@abs(score) + SCORE_MATE_EPS > SCORE_MATE_ABS) {
-        //     // TODO
-        //     uci_writer.print("info score mate {}\n", .{score}) catch {};
-        // } else {
-        // }
 
         return best_move;
     }
+};
 
+fn trimInvalidPvMoves(moves: []const Move) []const Move {
+    const len = std.mem.indexOfScalar(Move, moves, Move.NULL) orelse moves.len;
+    return moves[0..len];
+}
+
+pub const SearchControl = struct {
+    // TODO for adding real multithreading turn that into array
+    // and do something smart about synchronization
+    search_thread_thread: std.Thread,
+    search_thread: SearchThread,
+    // TODO move that to SearchThread
+    brd: Board,
+    uci_connection: *uci.UciConnection, 
+    time_controls: TimeControls,
+
+    // stop_request: bool,
+    is_exiting: bool,
+
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+
+    const Self = @This();
+
+    pub fn init(alloc: Alloc, uci_connection: *uci.UciConnection) !*Self {
+        const self = try alloc.create(Self);
+        self.mutex = .{};
+        self.brd = try .init(alloc, .DEFAULT);
+        self.is_exiting = false;
+        self.cond = .{};
+        self.search_thread = try SearchThread.init(alloc);
+        self.search_thread_thread = try std.Thread.spawn(.{ .allocator = alloc }, searchThreadEntry, .{ self, &self.search_thread });
+        self.uci_connection = uci_connection;
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.mutex.lock();
+        self.is_exiting = true;
+        self.mutex.unlock();
+        self.cond.broadcast();
+        self.search_thread_thread.join();
+        self.search_thread.deinit();
+        self.brd.deinit();
+    }
+
+    pub fn startSearch(self: *Self, brd: *const Board, time_controls: TimeControls) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        // TODO copy into each thread
+        try self.brd.cloneFrom(brd);
+        self.time_controls = time_controls;
+        self.search_thread.is_exiting_search.store(false, .seq_cst);
+        self.cond.broadcast();
+    }
+
+    pub fn stopSearch(self: *Self) !void {
+        self.search_thread.is_exiting_search.store(true, .seq_cst);
+    }
+
+    fn searchThreadEntry(control: *Self, search_thread: *SearchThread) !void {
+        control.mutex.lock();
+        defer control.mutex.unlock();
+
+        while (true) {
+            control.cond.wait(&control.mutex);
+            if (control.is_exiting) {
+                break;
+            }
+
+            control.mutex.unlock();
+            defer control.mutex.lock();
+
+            // TODO run figure out propper way to run that
+            const best_move = try search_thread.bestMove(&control.brd, control.uci_connection, control.time_controls);
+            try control.uci_connection.bestmove(best_move);
+        }
+    }
 };
