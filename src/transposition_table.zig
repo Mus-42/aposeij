@@ -5,72 +5,110 @@ const Alloc = std.mem.Allocator;
 const Move = board.Move;
 
 pub const TTEntry = struct {
-    key: u64,
-    depth: u8,
-    score: i16,
-    move: Move,
-    bound: Bound,
+    // lower 8 bits of tt key
+    key_low: u16 = 0,
+    depth: u8 = 0,
+    score: i16 = 0,
+    move: Move = .NULL,
+    bound: Bound = .lower, 
 };
 
-pub const Bound = enum {
-    lower,
+pub const TTBucket = struct {
+    entries: [4]TTEntry align(32),
+};
+
+comptime {
+    std.debug.assert(@sizeOf(TTEntry) == 8);
+    std.debug.assert(@alignOf(TTEntry) == 2);
+    std.debug.assert(@sizeOf(TTBucket) == 32);
+    std.debug.assert(@alignOf(TTBucket) == 32);
+}
+
+pub const Bound = enum (u2) {
+    lower = 0,
     exact,
     upper,
 };
 
 // TODO group entries into buckets?
 
-const TT_DEFAULT_SIZE = 1<<22;
+const TT_DEFAULT_SIZE = 1<<20;
 
 pub const TTable = struct {
-    entries: []TTEntry,
+    buckets: []TTBucket,
 
     const Self = @This();
 
     // TODO pass size as paramether (in mb?)
 
     pub fn init(alloc: Alloc) !Self {
-        const tt = try alloc.alloc(TTEntry, TT_DEFAULT_SIZE);
+        const tt = try alloc.alloc(TTBucket, TT_DEFAULT_SIZE);
+        @memset(tt, .{ .entries = [1]TTEntry{ .{} } ** 4 });
 
-        return .{ .entries = tt };
+        return .{ .buckets = tt };
     }
 
     pub fn deinit(self: *Self, alloc: Alloc) void {
-        alloc.free(self.entries);
+        alloc.free(self.buckets);
     }
 
     // TODO resize
     
-    fn entryIndex(self: *const Self, zobrist_key: u64) u64 {
-        return zobrist_key & (self.entries.len - 1);
+    fn indicies(self: *const Self, zobrist_key: u64) struct { u32, u16 } {
+        // TODO pick a better one?
+        const TT_MAGICK = 0x35C25ADD731CCD89;
+        const key: u64 = (zobrist_key *% TT_MAGICK) >> 8;
+        const index: u32 = @intCast(key >> 16 & (self.buckets.len - 1));
+        const lower_key: u16 = @intCast(key & 0xFFFF);
+        return .{ index, lower_key };
     }
 
     pub fn probe(self: *const Self, zobrist_key: u64, ply: u32) ?*const TTEntry {
-        const tt_index = self.entryIndex(zobrist_key);
-        const tt_entry = &self.entries[tt_index];
-        if (tt_entry.key != zobrist_key)
-            return null;
-
         // TODO correct mate score
         _ = ply; 
-        return tt_entry;
+
+        const tt_index, const lower_key = self.indicies(zobrist_key);
+        const tt_bucket = &self.buckets[tt_index];
+
+        for (&tt_bucket.entries) |*tt_entry| {
+            if (tt_entry.key_low == lower_key)
+                return tt_entry;
+        }
+
+        return null;
     }
 
     pub fn put(self: *Self, zobrist_key: u64, ply: u32, depth: u8, score: i16, bound: Bound, move: Move) void {
         // TODO correct mate score
         _ = ply; 
 
-        const tt_index = self.entryIndex(zobrist_key);
-        const tt_entry = &self.entries[tt_index];
+        const tt_index, const lower_key = self.indicies(zobrist_key);
+        const tt_bucket = &self.buckets[tt_index];
 
-        if (tt_entry.key != zobrist_key or tt_entry.depth <= depth) {
-            tt_entry.* = .{
-                .move = move,
-                .score = score,
-                .depth = depth,
-                .key = zobrist_key,
-                .bound = bound,
-            };
+        var entry_location: ?*TTEntry = null;
+
+        for (&tt_bucket.entries) |*tt_entry| {
+            if (tt_entry.key_low == lower_key) {
+                if (tt_entry.depth > depth)
+                    return;
+
+                entry_location = tt_entry;
+                break;
+            }
         }
+
+        if (entry_location == null) {
+            @memmove(tt_bucket.entries[1..4], tt_bucket.entries[0..3]);
+            entry_location = &tt_bucket.entries[0];
+        }
+
+        entry_location.?.* = .{
+            .move = move,
+            .key_low = lower_key,
+            //.is_occupied = true,
+            .score = score,
+            .depth = depth,
+            .bound = bound,
+        };
     }
 };

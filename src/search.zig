@@ -10,7 +10,7 @@ const PieceKind = board.PieceKind;
 const Board = board.Board;
 
 pub const MAX_DEPTH = 128;
-pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_s; 
+pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_min; 
 pub const MAX_EXTENSIONS = 8;
 
 pub const QS_TT_DEPTH = 0;

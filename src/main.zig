@@ -25,9 +25,6 @@ pub fn main() !void {
     var brd = try board.Board.init(alloc, .DEFAULT);
     defer brd.deinit();
 
-    // var b = try search.SearchThread.init(alloc, &uci_connection);
-    // defer b.deinit();
-
     var control = try search.SearchControl.init(alloc, &uci_connection);
     defer { 
         control.deinit();
