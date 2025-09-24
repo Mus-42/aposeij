@@ -34,6 +34,9 @@ pub const UciCommand = enum {
     // custom,
     displaypos,
     help,
+    perft,
+    perft_nonbulk,
+    bench,
 };
 
 pub const GuiToEngine = struct {
@@ -240,5 +243,13 @@ pub const UciConnection = struct {
         try self.stdout.writeAll("\n");
 
         try self.stdout.flush();
+    }
+
+    pub fn lockStdout(self: *Self) void {
+        self.stdout_mutex.lock();
+    }
+
+    pub fn unlockStdout(self: *Self) void {
+        self.stdout_mutex.unlock();
     }
 };
