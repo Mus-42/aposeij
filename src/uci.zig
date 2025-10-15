@@ -53,7 +53,7 @@ pub const SearchInfo = struct {
     score: i32,
 };
 
-pub const MAX_COMMAND_LEN = 4096;
+pub const MAX_COMMAND_LEN = 8192;
 
 pub const UciConnection = struct {
     stdin: *std.Io.Reader, 
@@ -194,7 +194,6 @@ pub const UciConnection = struct {
     }
 
     // Answers
-
     pub fn bestmove(self: *Self, move: Move) !void {
         self.stdout_mutex.lock();
         defer self.stdout_mutex.unlock();
@@ -223,7 +222,19 @@ pub const UciConnection = struct {
     pub fn searchInfo(self: *Self, info: SearchInfo) !void {
         self.stdout_mutex.lock();
         defer self.stdout_mutex.unlock();
+        try self.writeSearchInfo(info);
+        try self.stdout.flush();
+    }
 
+    pub fn lockStdout(self: *Self) void {
+        self.stdout_mutex.lock();
+    }
+
+    pub fn unlockStdout(self: *Self) void {
+        self.stdout_mutex.unlock();
+    }
+
+    fn writeSearchInfo(self: *Self, info: SearchInfo) !void {
         try self.stdout.print("info depth {[depth]} nodes {[nodes]} nps {[nps]} time {[time]} ", .{
             .depth = info.depth,
             .nodes = info.nodes,
@@ -241,15 +252,5 @@ pub const UciConnection = struct {
             }
         }
         try self.stdout.writeAll("\n");
-
-        try self.stdout.flush();
-    }
-
-    pub fn lockStdout(self: *Self) void {
-        self.stdout_mutex.lock();
-    }
-
-    pub fn unlockStdout(self: *Self) void {
-        self.stdout_mutex.unlock();
     }
 };

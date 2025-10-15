@@ -30,9 +30,7 @@ pub const Bound = enum (u2) {
     upper,
 };
 
-// TODO group entries into buckets?
-
-const TT_DEFAULT_SIZE = 1<<20;
+const TT_DEFAULT_SIZE_MB = 64;
 
 pub const TTable = struct {
     buckets: []TTBucket,
@@ -42,7 +40,9 @@ pub const TTable = struct {
     // TODO pass size as paramether (in mb?)
 
     pub fn init(alloc: Alloc) !Self {
-        const tt = try alloc.alloc(TTBucket, TT_DEFAULT_SIZE);
+        const size_buckets = (TT_DEFAULT_SIZE_MB << 20) / @sizeOf(TTBucket);
+
+        const tt = try alloc.alloc(TTBucket, size_buckets);
         @memset(tt, .{ .entries = [1]TTEntry{ .{} } ** 4 });
 
         return .{ .buckets = tt };

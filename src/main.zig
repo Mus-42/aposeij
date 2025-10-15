@@ -7,7 +7,7 @@ const options = @import("options");
 
 const Alloc = std.mem.Allocator;
 
-var stdin_buf: [4096]u8 = undefined;
+var stdin_buf: [uci.MAX_COMMAND_LEN]u8 = undefined;
 var stdout_buf: [256]u8 = undefined;
 
 pub fn main() !void {
@@ -41,16 +41,21 @@ pub fn main() !void {
 
         switch (command.command) {
             .uci => try uci_connection.uciok(),
-            .isready => try uci_connection.readyok(),
-            .stop => try control.stopSearch(),
+            .isready => {
+                try control.waitUntilSearchEnded();
+                try uci_connection.readyok();
+            },
+            .stop => try control.signalStopSearch(),
             .quit => break,
             .position => try uci_connection.parsePositionArgs(command.arguments, &brd),
             .go => {
                 const time_controls = try uci_connection.parseGoArgs(command.arguments, brd.data.side_to_move);
+                try control.waitUntilSearchEnded();
                 try control.startSearch(&brd, time_controls);
             },
             .ucinewgame => {
-                // TODO
+                try control.signalStopSearch();
+                try control.waitUntilSearchEnded();
             },
             .displaypos => {
                 brd.data.debugPrint();
