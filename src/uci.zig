@@ -63,9 +63,6 @@ pub const UciConnection = struct {
     const Self = @This();
 
     pub fn init(stdin: *std.Io.Reader, stdout: *std.Io.Writer) Self {
-        // there are some _very_ long commands that should fully fit into buffer (like `position`)
-        std.debug.assert(stdin.buffer.len == MAX_COMMAND_LEN);
-
         return .{
             .stdin = stdin,
             .stdout = stdout,
@@ -78,6 +75,9 @@ pub const UciConnection = struct {
 
     /// reads stdin until find valid uci command
     pub fn readCommand(self: *Self) !GuiToEngine {
+        // there are some _very_ long commands that should fully fit into buffer (like `position`)
+        std.debug.assert(self.stdin.buffer.len == MAX_COMMAND_LEN);
+
         while (true) {
             try self.stdin.rebase(MAX_COMMAND_LEN);
             const command_full = try self.stdin.takeDelimiterInclusive('\n');
