@@ -105,19 +105,28 @@ test sideFlipBitboard {
 }
 
 pub const CastlingRights = packed struct (u4) {
-    white_kingside: bool =  true,
+    white_kingside: bool  = true,
     white_queenside: bool = true,
-    black_kingside: bool = true,
+    black_kingside: bool  = true,
     black_queenside: bool = true,
 
     const Self = @This();
 
+    const NO_RIGHTS: Self = .{
+        .white_kingside  = false,
+        .white_queenside = false,
+        .black_kingside  = false,
+        .black_queenside = false,
+    };
+
+    const WHITE_QUEENSIDE_MASK = @as(u64, 1 << 4  | 1 << 0);
+    const WHITE_KINGSIDE_MASK  = @as(u64, 1 << 4  | 1 << 7);
+    const BLACK_QUEENSIDE_MASK = @as(u64, 1 << 60 | 1 << 56);
+    const BLACK_KINGSIDE_MASK  = @as(u64, 1 << 60 | 1 << 63);
+
     pub fn updateAfterMove(self: *Self, move: Move) void {
-        const WHITE_QUEENSIDE_MASK = @as(u64, 1 << 4  | 1 << 0);
-        const WHITE_KINGSIDE_MASK  = @as(u64, 1 << 4  | 1 << 7);
-        const BLACK_QUEENSIDE_MASK = @as(u64, 1 << 60 | 1 << 56);
-        const BLACK_KINGSIDE_MASK  = @as(u64, 1 << 60 | 1 << 63);
         const move_mask = @as(u64, 1) << move.from | @as(u64, 1) << move.to;
+
         self.white_queenside = self.white_queenside and WHITE_QUEENSIDE_MASK & move_mask == 0;
         self.white_kingside  = self.white_kingside  and WHITE_KINGSIDE_MASK  & move_mask == 0;
         self.black_queenside = self.black_queenside and BLACK_QUEENSIDE_MASK & move_mask == 0;
@@ -136,10 +145,14 @@ pub const Board = struct {
         castling_rights: CastlingRights = .{},
         side_to_move: SideToMove = .white,
         en_passant_target: ?Square = null,
+        is_in_check: bool = false,
         zobrist_key: u64 = 0,
 
         pub const EMPTY: BoardData = .{ .pieces = @splat(0) };
-        pub const DEFAULT = readFen(DEFAULT_FEN_STRING) catch unreachable;
+        pub const DEFAULT = blk: {
+            @setEvalBranchQuota(2000);
+            break :blk readFen(DEFAULT_FEN_STRING) catch unreachable;
+        };
 
         pub fn getPieceAt(self: BoardData, square: Square) ?PieceKind {
             inline for (0..12) |i| {
@@ -192,7 +205,7 @@ pub const Board = struct {
                 var piece = self.pieces[i];
                 while (piece != 0) : (piece &= piece - 1) {
                     const pos = @ctz(piece);
-                    key ^= zobrist_hash.PIECES[i << 6 | pos];
+                    key ^= zobrist_hash.PIECE_SQUARES[i << 6 | pos];
                 }
             }
 
@@ -207,6 +220,20 @@ pub const Board = struct {
             }
 
             self.zobrist_key = key;
+        }
+
+        fn computeIsInCheck(self: BoardData) bool {
+            // TODO rewrite that (too slow & too dumm)
+            var state = computeMovegenState(self);
+
+            if (self.side_to_move != .white) {
+                state = sideFlipState(state);
+            }
+
+            const kings = state.pieces[@intFromEnum(PieceKind.w_king)];
+            std.debug.assert(@popCount(kings) == 1);
+            const king_pos: Square = @intCast(@ctz(kings));
+            return isSquareUnderAttack(king_pos, state);
         }
     };
 
@@ -241,10 +268,9 @@ pub const Board = struct {
         self.data = other.data;
     }
 
-    pub fn makeMove(self: *Self, move: Move) void {
+    pub fn makeMove(self: *Self, move: Move) bool {
         self.history.appendAssumeCapacity(.{ .data = self.data, .move = move });
         
-        self.data.castling_rights.updateAfterMove(move);
         self.data.en_passant_target = null;
 
         var reset_50_moves_clock = false;
@@ -299,6 +325,13 @@ pub const Board = struct {
             self.data.setPieceAt(move.to, piece);
         }
 
+        const is_opponent_king_in_check = self.data.computeIsInCheck();
+        // illegal move
+        if (is_opponent_king_in_check) {
+            self.unmakeMove();
+            return true;
+        }
+
         if (self.data.side_to_move == .black) {
             self.data.halfmoves50 += 1;
         }
@@ -308,7 +341,12 @@ pub const Board = struct {
         }
 
         self.data.side_to_move.flip();
+        self.data.is_in_check = self.data.computeIsInCheck();
+        // TODO don't compute from scratch each single time
         self.data.recomputeZobristKey();
+        self.data.castling_rights.updateAfterMove(move);
+
+        return false;
     }
 
     pub fn unmakeMove(self: *Self) void {
@@ -326,19 +364,6 @@ pub const Board = struct {
         return repetitions;
     }
 
-    pub fn isInCheck(self: *const Self) bool {
-        // TODO rewrite that (too slow & too dumm)
-        var state = computeMovegenState(self.data);
-
-        if (self.data.side_to_move != .white) {
-            state = sideFlipState(state);
-        }
-
-        const attack_gen = AttackGenState.init(state);
-        const attacks = attack_gen.attacks_all;
-        const kings = state.pieces[@intFromEnum(PieceKind.w_king)];
-        return attacks & kings != 0;
-    }
 
     pub fn isDraw50Moves(self: *const Self) bool {
         return self.data.halfmoves50 >= 50;
@@ -479,6 +504,9 @@ pub fn readFen(s: []const u8) FenReadError!Board.BoardData {
 
     if (i != s.len) return error.InvalidFenCharacter;
 
+    board.is_in_check = board.computeIsInCheck();
+    board.recomputeZobristKey();
+
     return board;
 }
 
@@ -583,23 +611,34 @@ const zobrist_hash = struct {
     };
 
     fn generateVectors(seed: u64, comptime size: usize) [size]u64 {
+        // @setEvalBranchQuota(1000000);
         @setEvalBranchQuota(10000);
 
         var rng: XorshiftRng = .{ .state = seed };
+        // var rng: std.Random.DefaultPrng = .init(seed);
         var ret: [size]u64 = undefined;
         for (&ret) |*v| {
             const a = rng.next();
             const b = rng.next();
-            v.* = a & b;
+            const c = rng.next();
+            v.* = a & b & c;
+            std.debug.assert(v.* != 0);
         }
+        
+        // for (0..ret.len-1) |i| {
+        //     for (i+1..ret.len) |j| {
+        //         std.debug.assert(ret[i] != ret[j]);
+        //     }
+        // }
+
         return ret;
     }
 
-    const SEED = 42;
+    const SEED = 4242;
     const PIECES_COUNT = 12 * 64;
     const ZOBRIST_VECTORS = generateVectors(SEED, PIECES_COUNT + 1 + 24);
 
-    const PIECES: [PIECES_COUNT]u64 = ZOBRIST_VECTORS[0..PIECES_COUNT].*;
+    const PIECE_SQUARES: [PIECES_COUNT]u64 = ZOBRIST_VECTORS[0..PIECES_COUNT].*;
     const CASTLING_RIGHTS: [16]u64 = ZOBRIST_VECTORS[PIECES_COUNT..PIECES_COUNT+16].*;
     const EP_FILE: [8]u64 = ZOBRIST_VECTORS[PIECES_COUNT+16..PIECES_COUNT+24].*;
     const SIDE_TO_MOVE: u64 = ZOBRIST_VECTORS[PIECES_COUNT+24];
@@ -693,104 +732,6 @@ const MoveGenState = struct {
     ep_target: ?Square,
 };
 
-// TODO instead of generating attacks for all squares and then checking single one it's better to generate & check for single square?
-const AttackGenState = struct {
-    attacks: [6]u64,
-    attacks_all: u64,
-    invalidation_mask: u64,
-
-    // Knights -> change only if knight dissapears
-    // sliding pieces & king -> change if past attack square OR piece changed
-
-    const Self = @This();
-
-    fn init(state: MoveGenState) Self {
-        var self: Self = .{
-            .attacks = @splat(0),
-            .attacks_all = 0,
-            .invalidation_mask = 0,
-        };
-
-        self.attacks[0] = genPieceAttacks(blackPawnAttacks, state.pieces[@intFromEnum(PieceKind.b_pawn)], state.black, state.white);
-        self.attacks[1] = genPieceAttacks(knightMoves, state.pieces[@intFromEnum(PieceKind.b_knight)],    state.black, state.white);
-        self.attacks[2] = genPieceAttacks(bishopMoves, state.pieces[@intFromEnum(PieceKind.b_bishop)],    state.black, state.white);
-        self.attacks[3] = genPieceAttacks(rookMoves,   state.pieces[@intFromEnum(PieceKind.b_rook)],      state.black, state.white);
-        self.attacks[4] = genPieceAttacks(queenMoves,  state.pieces[@intFromEnum(PieceKind.b_queen)],     state.black, state.white);
-        self.attacks[5] = genPieceAttacks(kingMoves,   state.pieces[@intFromEnum(PieceKind.b_king)],      state.black, state.white);
-        
-        var all: u64 = 0;
-        for (self.attacks) |attack| {
-            all |= attack;
-        }
-        self.attacks_all = all;
-
-        self.invalidation_mask = 
-            self.attacks[@intFromEnum(PieceKind.w_bishop)] |
-            self.attacks[@intFromEnum(PieceKind.w_rook)] |
-            self.attacks[@intFromEnum(PieceKind.w_queen)];
-
-        return self;
-    }
-
-    fn afterMoveAttacksBitboard(self: *const Self, state: MoveGenState, from: u6, to: u6, comptime is_ep: bool) u64 {
-        const white_moved, const black_captured = if (is_ep) 
-            .{ @as(u64, 1) << from | @as(u64, 1) << to, @as(u64, 1) << (to ^ 8) }
-            else 
-            .{ @as(u64, 1) << from | @as(u64, 1) << to, @as(u64, 1) << to };
-       
-        const move_diff = white_moved | black_captured;
-
-        if (move_diff & (self.invalidation_mask | state.black) == 0)
-            return self.attacks_all;
-        
-        const pawns   = state.pieces[@intFromEnum(PieceKind.b_pawn)];
-        const knights = state.pieces[@intFromEnum(PieceKind.b_knight)];
-        const bishops = state.pieces[@intFromEnum(PieceKind.b_bishop)];
-        const rooks   = state.pieces[@intFromEnum(PieceKind.b_rook)];
-        const queens  = state.pieces[@intFromEnum(PieceKind.b_queen)];
-
-        const bishop_attacks = self.attacks[@intFromEnum(PieceKind.w_bishop)];
-        const rook_attacks   = self.attacks[@intFromEnum(PieceKind.w_rook)];
-        const queen_attacks  = self.attacks[@intFromEnum(PieceKind.w_queen)];
-
-        var attacks: u64 = 0;
-
-        if (black_captured & pawns != 0) {
-            attacks |= genPieceAttacks(blackPawnAttacks, pawns & ~black_captured, state.black & ~black_captured, state.white ^ white_moved);
-        } else {
-            attacks |= self.attacks[@intFromEnum(PieceKind.w_pawn)];
-        }
-
-        if (black_captured & knights != 0) {
-            attacks |= genPieceAttacks(knightMoves, knights & ~black_captured, state.black & ~black_captured, state.white ^ white_moved);
-        } else {
-            attacks |= self.attacks[@intFromEnum(PieceKind.w_knight)];
-        }
-
-        if (move_diff & (bishops | bishop_attacks) != 0) {
-            attacks |= genPieceAttacks(bishopMoves, bishops & ~black_captured, state.black & ~black_captured, state.white ^ white_moved);
-        } else {
-            attacks |= bishop_attacks;
-        }
-
-        if (move_diff & (rooks | rook_attacks) != 0) {
-            attacks |= genPieceAttacks(rookMoves, rooks & ~black_captured, state.black & ~black_captured, state.white ^ white_moved);
-        } else {
-            attacks |= rook_attacks;
-        }
-
-        if (move_diff & (queens | queen_attacks) != 0) {
-            attacks |= genPieceAttacks(queenMoves, queens & ~black_captured, state.black & ~black_captured, state.white ^ white_moved);
-        } else {
-            attacks |= queen_attacks;
-        }
-
-        attacks |= self.attacks[@intFromEnum(PieceKind.w_king)];
-
-        return attacks;
-    }
-};
-
 pub const Moves = struct {
     p: [MAX_MOVES]Move = undefined,
     i: usize = 0,
@@ -841,16 +782,47 @@ pub fn genMoves(board: Board.BoardData, moves: *Moves) void {
     }
 }
 
+pub fn isSquareUnderAttack(pos: Square, state: MoveGenState) bool {
+    if (isSquareUnderAttakByPieceImpl(blackPawnAttacks, state, pos, state.pieces[@intFromEnum(PieceKind.b_pawn)])) {
+        return true;
+    }
+    if (isSquareUnderAttakByPieceImpl(knightMoves, state, pos, state.pieces[@intFromEnum(PieceKind.b_knight)])) {
+        return true;
+    }
+    if (isSquareUnderAttakByPieceImpl(bishopMoves, state, pos, state.pieces[@intFromEnum(PieceKind.b_bishop)])) {
+        return true;
+    }
+    if (isSquareUnderAttakByPieceImpl(rookMoves,   state, pos, state.pieces[@intFromEnum(PieceKind.b_rook)])) {
+        return true;
+    }
+    if (isSquareUnderAttakByPieceImpl(queenMoves,  state, pos, state.pieces[@intFromEnum(PieceKind.b_queen)])) {
+        return true;
+    }
+    if (isSquareUnderAttakByPieceImpl(kingMoves,   state, pos, state.pieces[@intFromEnum(PieceKind.b_king)])) {
+        return true;
+    }
 
+    return false;
+}
+
+fn isSquareUnderAttakByPieceImpl(comptime movesFn: anytype, state: MoveGenState, pos: Square, piece_bitboard: u64) bool {
+    var piece = piece_bitboard;
+    while (piece != 0) : (piece &= piece - 1) {
+        const piece_pos: Square = @intCast(@ctz(piece));
+        if (movesFn(piece_pos, state.white, state.black) >> pos & 1 != 0) {
+            // std.debug.print("{s} under attack by: {s}\n", .{SQUARE_TO_STRING[pos], SQUARE_TO_STRING[piece_pos]});
+            return true;
+        }
+    }
+    return false;
+}
 
 fn genWhiteMoves(state: MoveGenState, moves: *Moves) void {
-    const attacks_gen = AttackGenState.init(state);
-
-    genWhitePawnMoves(state, attacks_gen, moves, state.pieces[@intFromEnum(PieceKind.w_pawn)]);
-    genPieceMoves(knightMoves, state, attacks_gen, moves, state.pieces[@intFromEnum(PieceKind.w_knight)]);
-    genPieceMoves(bishopMoves, state, attacks_gen, moves, state.pieces[@intFromEnum(PieceKind.w_bishop)]);
-    genPieceMoves(rookMoves,   state, attacks_gen, moves, state.pieces[@intFromEnum(PieceKind.w_rook)]);
-    genPieceMoves(queenMoves,  state, attacks_gen, moves, state.pieces[@intFromEnum(PieceKind.w_queen)]);
+    genWhitePawnMoves(state, moves, state.pieces[@intFromEnum(PieceKind.w_pawn)]);
+    genPieceMoves(knightMoves, state, moves, state.pieces[@intFromEnum(PieceKind.w_knight)]);
+    genPieceMoves(bishopMoves, state, moves, state.pieces[@intFromEnum(PieceKind.w_bishop)]);
+    genPieceMoves(rookMoves,   state, moves, state.pieces[@intFromEnum(PieceKind.w_rook)]);
+    genPieceMoves(queenMoves,  state, moves, state.pieces[@intFromEnum(PieceKind.w_queen)]);
 
     const kings = state.pieces[@intFromEnum(PieceKind.w_king)];
     std.debug.assert(@popCount(kings) == 1);
@@ -858,10 +830,6 @@ fn genWhiteMoves(state: MoveGenState, moves: *Moves) void {
     var to_all = kingMoves(king_pos, state.white, state.black) & ~state.white;
     while (to_all != 0) : (to_all &= to_all - 1) {
         const to: Square = @intCast(@ctz(to_all));
-        const black_attacks = attacks_gen.afterMoveAttacksBitboard(state, king_pos, to, false);
-        if (black_attacks >> to & 1 != 0) {
-            continue;
-        }
         moves.add(.{
             .from = king_pos,
             .to = to,
@@ -870,7 +838,8 @@ fn genWhiteMoves(state: MoveGenState, moves: *Moves) void {
         });
     }
     
-    to_all = whiteKingCastling(king_pos, state.white, state.black, attacks_gen.attacks_all, state.castling.white_kingside, state.castling.white_queenside);
+    // TODO attacks
+    to_all = whiteKingCastling(state);
     while (to_all != 0) : (to_all &= to_all - 1) {
         const to: Square = @intCast(@ctz(to_all));
         const extra: Move.QuietSpetial = if (to == 2) .queen_castle else .king_castle;
@@ -882,7 +851,8 @@ fn genWhiteMoves(state: MoveGenState, moves: *Moves) void {
     }
 }
 
-fn genWhitePawnMoves(state: MoveGenState, attack_gen: AttackGenState, moves: *Moves, piece_bitboard: u64) void {
+
+fn genWhitePawnMoves(state: MoveGenState, moves: *Moves, piece_bitboard: u64) void {
     var pieces = piece_bitboard;
     const ep_targets = if (state.ep_target) |target| @as(u64, 1) << target else 0;
     while (pieces != 0) : (pieces &= pieces - 1) {
@@ -892,24 +862,12 @@ fn genWhitePawnMoves(state: MoveGenState, attack_gen: AttackGenState, moves: *Mo
             const to: Square = @intCast(@ctz(to_all));
             
             if (ep_targets >> to & 1 != 0) {
-                const black_attacks = attack_gen.afterMoveAttacksBitboard(state, from, to, true);
-
-                if (state.pieces[@intFromEnum(PieceKind.w_king)] & black_attacks != 0) {
-                    continue;
-                }
-
                 moves.add(.{
                     .from = from,
                     .to = to,
                     .is_capture = true,
                     .extra = .{ .capture = .ep_capture },
                 });
-                continue;
-            }
-
-            const black_attacks = attack_gen.afterMoveAttacksBitboard(state, from, to, false);
-
-            if (state.pieces[@intFromEnum(PieceKind.w_king)] & black_attacks != 0) {
                 continue;
             }
             
@@ -938,20 +896,13 @@ fn genWhitePawnMoves(state: MoveGenState, attack_gen: AttackGenState, moves: *Mo
     }
 }
 
-fn genPieceMoves(comptime movesFn: anytype, state: MoveGenState, attack_gen: AttackGenState, moves: *Moves, piece_bitboard: u64) void {
+fn genPieceMoves(comptime movesFn: anytype, state: MoveGenState, moves: *Moves, piece_bitboard: u64) void {
     var pieces = piece_bitboard;
     while (pieces != 0) : (pieces &= pieces - 1) {
         const from: Square = @intCast(@ctz(pieces));
         var to_all = movesFn(from, state.white, state.black) & ~state.white;
         while (to_all != 0) : (to_all &= to_all - 1) {
             const to: Square = @intCast(@ctz(to_all));
-            const black_attacks = attack_gen.afterMoveAttacksBitboard(state, from, to, false);
-
-            // king under attack
-            if (state.pieces[@intFromEnum(PieceKind.w_king)] & black_attacks != 0) {
-                continue;
-            }
-
             moves.add(.{
                 .from = from,
                 .to = to,
@@ -989,12 +940,17 @@ fn computeMovegenState(board: Board.BoardData) MoveGenState {
         black |= board.pieces[i];
     }
 
+    var castling = board.castling_rights;
+    if (board.is_in_check) {
+        castling = .NO_RIGHTS;
+    }
+
     return .{
         .all = white | black,
         .white = white,
         .black = black,
         .pieces = board.pieces,
-        .castling = board.castling_rights,
+        .castling = castling,
         .ep_target = board.en_passant_target,
     };
 }
@@ -1147,10 +1103,28 @@ fn kingMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
     return moves;
 }
 
-fn whiteKingCastling(piece_pos: Square, white_pieces: u64, black_pieces: u64, black_attacks: u64, can_kingside: bool, can_queenside: bool) u64 {
-    if (piece_pos != 4) return 0;
 
-    const all_pieces = white_pieces | black_pieces;
+fn isAnySquareUnderAttack(squares: u64, state: MoveGenState) bool {
+    var pos = squares;
+    while (pos != 0) : (pos &= pos - 1) {
+        if (isSquareUnderAttack(@intCast(@ctz(pos)), state)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn whiteKingCastling(state: MoveGenState) u64 {
+    if (!state.castling.white_kingside and !state.castling.white_queenside) 
+        return 0;
+
+    std.debug.assert(@ctz(state.pieces[@intFromEnum(PieceKind.w_king)]) == 4);
+    std.debug.assert(@popCount(state.pieces[@intFromEnum(PieceKind.w_king)]) == 1);
+
+    const all_pieces = state.white | state.black;
+
+    const can_kingside = state.castling.white_kingside;
+    const can_queenside = state.castling.white_queenside;
 
     const KINGSIDE_ATTACKS_MASK  = 0b01110000;
     const QUEENSIDE_ATTACKS_MASK = 0b00011100;
@@ -1158,11 +1132,15 @@ fn whiteKingCastling(piece_pos: Square, white_pieces: u64, black_pieces: u64, bl
     const QUEENSIDE_SPACE_MASK   = 0b00001110;
 
     var moves: u64 = 0;
-    if (black_attacks & KINGSIDE_ATTACKS_MASK == 0 and all_pieces & KINGSIDE_SPACE_MASK == 0 and can_kingside) {
-        moves |= 1 << 6;
+    if (all_pieces & KINGSIDE_SPACE_MASK == 0 and can_kingside) {
+        if (!isAnySquareUnderAttack(KINGSIDE_ATTACKS_MASK, state)) {
+            moves |= 1 << 6;
+        }
     }
-    if (black_attacks & QUEENSIDE_ATTACKS_MASK == 0 and all_pieces & QUEENSIDE_SPACE_MASK == 0 and can_queenside) {
-        moves |= 1 << 2;
+    if (all_pieces & QUEENSIDE_SPACE_MASK == 0 and can_queenside) {
+        if (!isAnySquareUnderAttack(QUEENSIDE_ATTACKS_MASK, state)) {
+            moves |= 1 << 2;
+        }
     }
 
     return moves;

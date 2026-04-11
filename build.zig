@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    
+
     const board = b.createModule(.{
         .root_source_file = b.path("src/board.zig"),
         .target = target,
@@ -14,11 +14,14 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "board", .module = board } }
+        .imports = &.{.{
+            .name = "board",
+            .module = board,
+        }},
     });
 
     var exit_code: u8 = undefined;
-    const git_commit = b.runAllowFail(&.{"git", "rev-parse", "--short", "HEAD"}, &exit_code, .Ignore) catch "unknown";
+    const git_commit = b.runAllowFail(&.{ "git", "rev-parse", "--short", "HEAD" }, &exit_code, .Ignore) catch "unknown";
 
     const aposeij_options = b.addOptions();
     // TODO use hash for clean tree, "dev" + hash for tree with changes, version for tagget commit
@@ -27,7 +30,7 @@ pub fn build(b: *std.Build) !void {
 
     const aposeij = b.addExecutable(.{
         .name = "aposeij",
-        .root_module = aposeij_root_module
+        .root_module = aposeij_root_module,
     });
 
     b.installArtifact(aposeij);
@@ -64,7 +67,7 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("test/perft.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{ .{ .name = "board", .module = board } }
+            .imports = &.{.{ .name = "board", .module = board }},
         }),
     });
 
@@ -73,4 +76,3 @@ pub fn build(b: *std.Build) !void {
     const perft_test_step = b.step("perft_test", "Run perft (movegen) tests");
     perft_test_step.dependOn(&run_perft_test_cmd.step);
 }
-

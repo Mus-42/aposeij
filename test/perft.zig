@@ -9,13 +9,14 @@ pub fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     var moves = board.Moves{};
     board.genMoves(brd.data, &moves);
 
-    if (remaining_depth == 1) {
-        return moves.i;
-    }
+    // if (remaining_depth == 1) {
+    //     return moves.i;
+    // }
 
     var pos_count = @as(u64, 0);
     for (moves.moves()) |move| {
-        brd.makeMove(move);
+        if (brd.makeMove(move))
+            continue;
         pos_count += perft(brd, remaining_depth - 1);
         brd.unmakeMove();
     }
@@ -60,9 +61,11 @@ pub fn main() !void {
             if (score != expected_score) {
                 is_passed = false;
                 std.debug.print("fen {s} failed at depth {d}. expected score {d} but computed {d}\n", .{fen, d, expected_score, score});
+                break;
             }
         }
         if (is_passed) {
+            std.debug.print("passed fen {s}\n", .{fen});
             passed += 1;
         }
         total += 1;

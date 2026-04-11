@@ -123,7 +123,8 @@ pub const UciConnection = struct {
             var found = false;
             for (moves.moves()) |m| {
                 if (std.mem.eql(u8, m.algebraicNotation().toStr(), move)) {
-                    brd.makeMove(m);
+                    if (brd.makeMove(m))
+                        break;
                     found = true;
                     break;
                 }

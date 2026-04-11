@@ -61,11 +61,12 @@ pub fn main() !void {
                 brd.data.debugPrint();
                 var buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
                 std.debug.print("{s}\n", .{board.writeFen(&buf, brd.data)});
+                std.debug.print("key: {x}\n", .{brd.data.zobrist_key});
             },
             .perft, .perft_nonbulk => {
                 const is_bulk = command.command == .perft;
                 const depth = std.fmt.parseInt(u32, command.arguments, 10) catch {
-                    std.debug.print("usage: perft [DEPTH]", .{});
+                    std.debug.print("usage: perft [DEPTH]\n", .{});
                     continue;
                 };
                 uci_connection.lockStdout();
@@ -164,7 +165,8 @@ fn perft_root(comptime is_bulk: bool, brd: *board.Board, remaining_depth: u32, o
 
     var nodes_count = @as(u64, 0);
     for (moves.moves()) |move| {
-        brd.makeMove(move);
+        if (brd.makeMove(move))
+            continue;
         const per_move_count = perft(is_bulk, brd, remaining_depth - 1);
         try output.print("{s} - {d}\n", .{move.algebraicNotation().toStr(), per_move_count});
         nodes_count += per_move_count;
@@ -182,14 +184,10 @@ fn perft(comptime is_bulk: bool, brd: *board.Board, remaining_depth: u32) u64 {
     var moves = board.Moves{};
     board.genMoves(brd.data, &moves);
 
-    if (is_bulk and remaining_depth == 1) {
-        return moves.i;
-    }
-    
-
     var nodes_count = @as(u64, 0);
     for (moves.moves()) |move| {
-        brd.makeMove(move);
+        if (brd.makeMove(move))
+            continue;
         nodes_count += perft(is_bulk, brd, remaining_depth - 1);
         brd.unmakeMove();
     }

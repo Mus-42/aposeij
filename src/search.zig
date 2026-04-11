@@ -241,7 +241,7 @@ pub const SearchThread = struct {
         board.genMoves(self.brd.data, &moves);
 
         if (moves.count() == 0) {
-            if (self.brd.isInCheck()) {
+            if (self.brd.data.is_in_check) {
                 return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
             }
             return 0;
@@ -252,9 +252,8 @@ pub const SearchThread = struct {
         const moves_len = moves.moves().len;
 
         if (moves_len == 0) {
-            return self.evalPosition();
+            return static_eval;
         }
-
         
         var scores_buf: [board.MAX_MOVES]i16 = undefined;
         const scores = scores_buf[0..moves_len];
@@ -263,11 +262,15 @@ pub const SearchThread = struct {
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
         var tt_bound: tt.Bound = .upper;
+        var has_moves = false;
 
         for (moves.moves()) |move| {
             std.debug.assert(move.is_capture);
 
-            self.brd.makeMove(move);
+            if (self.brd.makeMove(move))
+                continue;
+            has_moves = true;
+
             const move_eval = -self.quiescenceSearch(node_type, -beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
@@ -279,7 +282,8 @@ pub const SearchThread = struct {
                 tt_bound = .lower;
                 best_move = move;
                 eval = move_eval;
-                return move_eval;
+                // return move_eval;
+                break;
             }
 
             if (move_eval > eval) {
@@ -291,6 +295,15 @@ pub const SearchThread = struct {
                     tt_bound = .exact;
                 }
             }
+        }
+
+        // No legal moves
+        // TODO smarter condition
+        if (!has_moves) {
+            if (self.brd.data.is_in_check) {
+                return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
+            }
+            return 0;
         }
 
         if (self.is_exiting_search.load(.unordered)) {
@@ -384,7 +397,12 @@ pub const SearchThread = struct {
             }
         }
 
-        const static_eval = self.quiescenceSearch(node_type, root_alpha, beta, ply);
+        const static_eval = self.quiescenceSearch(node_type, alpha, beta, ply);
+        if (static_eval == -SCORE_INFINITY) {
+            var buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
+            std.debug.print("{s}\n", .{board.writeFen(&buf, self.brd.data)});
+            std.debug.assert(false);
+        }
         if (self.is_exiting_search.load(.unordered)) {
             // TODO?
             return 0;
@@ -397,7 +415,7 @@ pub const SearchThread = struct {
 
         var eval = -SCORE_INFINITY;
 
-        if (!is_pv_node and !self.brd.isInCheck() and @abs(alpha) < 2000) {
+        if (!is_pv_node and !self.brd.data.is_in_check and @abs(alpha) < 2000) {
             const margin = @as(i16, @intCast(150 * remaining_depth));
             if (static_eval >= beta + margin ) {
                 return static_eval;
@@ -417,7 +435,7 @@ pub const SearchThread = struct {
         const moves_len = moves.moves().len;
 
         if (moves_len == 0) {
-            if (self.brd.isInCheck()) {
+            if (self.brd.data.is_in_check) {
                 return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
             }
             return 0;
@@ -432,11 +450,11 @@ pub const SearchThread = struct {
         var tt_bound: tt.Bound = .upper;
 
         for (0.., moves.moves()) |i, move| {
-            self.brd.makeMove(move);
-            const is_in_check = self.brd.isInCheck();
+            if (self.brd.makeMove(move))
+                continue;
 
             var search_ext: u32 = 0;
-            if (is_in_check) {
+            if (self.brd.data.is_in_check) {
                 search_ext += 1;
             }
             if (move.is_promotion and move.extra.promotion == .queen) {
@@ -469,6 +487,10 @@ pub const SearchThread = struct {
                 }
                 eval = move_eval;
                 best_move = move;
+                if (is_pv_node) {
+                    self.setNewPvMoveAtPly(move, ply);
+                }
+
                 tt_bound = .lower;
                 break;
             }
@@ -476,7 +498,6 @@ pub const SearchThread = struct {
             if (move_eval > eval) {
                 eval = move_eval;
                 best_move = move;
-
                 if (is_pv_node) {
                     self.setNewPvMoveAtPly(move, ply);
                 }
@@ -486,6 +507,16 @@ pub const SearchThread = struct {
                     tt_bound = .exact;
                 }
             }
+        }
+
+        // Should be the same condition
+        // Reachable if and only if has 0 legal moves
+        if (eval == -SCORE_INFINITY or best_move == Move.NULL) {
+            std.debug.assert(ply > 0);
+            if (self.brd.data.is_in_check) {
+                return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
+            }
+            return 0;
         }
 
         if (best_move != Move.NULL and !best_move.is_capture) {
@@ -498,6 +529,8 @@ pub const SearchThread = struct {
                 self.history.add(color, move, -bonus);
             }
         }
+
+        std.debug.assert(ply != 0 or best_move != Move.NULL);
 
         // prevent storing to tt 
         if (self.is_exiting_search.load(.unordered)) {
@@ -565,11 +598,8 @@ pub const SearchThread = struct {
             }
 
             score = this_iteration_score;
-
-
-            if (self.perPlyPv(0)[0] != Move.NULL) {
-                best_move = self.perPlyPv(0)[0];
-            }
+            best_move = self.perPlyPv(0)[0];
+            std.debug.assert(best_move != Move.NULL);
 
             if (d >= depth_target) {
                 break;

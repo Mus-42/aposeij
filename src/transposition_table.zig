@@ -5,7 +5,7 @@ const Alloc = std.mem.Allocator;
 const Move = board.Move;
 
 pub const TTEntry = struct {
-    // lower 8 bits of tt key
+    // lower 16 bits of tt key
     key_low: u16 = 0,
     depth: u8 = 0,
     score: i16 = 0,
