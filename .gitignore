@@ -3,3 +3,4 @@ tmp
 .zig-cache
 zig-out
 config.json
+log.txt

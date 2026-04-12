@@ -9,14 +9,14 @@ const Move = board.Move;
 const PieceKind = board.PieceKind;
 const Board = board.Board;
 
-pub const MAX_DEPTH = 128;
+pub const MAX_PLY = 128;
 pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_min; 
 pub const MAX_EXTENSIONS = 8;
 
 pub const QS_TT_DEPTH = 0;
 
 pub const SCORE_MATE_ABS: i16 = 32000;
-pub const SCORE_MATE_EPS: i16 = MAX_DEPTH;
+pub const SCORE_MATE_EPS: i16 = MAX_PLY;
 pub const SCORE_INFINITY: i16 = SCORE_MATE_ABS+1;
 
 pub const TIME_EPS_NS: u64 = 200;
@@ -69,7 +69,7 @@ pub const SearchThread = struct {
     brd: *Board = undefined,
     tt: tt.TTable,
     pv_moves: []Move,
-    per_ply: *[MAX_DEPTH]PerPly,
+    per_ply: *[MAX_PLY]PerPly,
     history: *History,
 
     // Stats
@@ -90,8 +90,8 @@ pub const SearchThread = struct {
     const Self = @This();
 
     pub fn init(alloc: Alloc) !Self {
-        const pv_moves = try alloc.alloc(Move, MAX_DEPTH * (MAX_DEPTH + 1) / 2);
-        const per_ply = try alloc.create([MAX_DEPTH]PerPly);
+        const pv_moves = try alloc.alloc(Move, MAX_PLY * (MAX_PLY + 1) / 2);
+        const per_ply = try alloc.create([MAX_PLY]PerPly);
         const history = try alloc.create(History);
         const ttable = try tt.TTable.init(alloc);
 
@@ -125,6 +125,7 @@ pub const SearchThread = struct {
         self.nodes = 0;
         self.qsearch_nodes = 0;
         @memset(self.perPlyPv(0), Move.NULL);
+        // @memset(self.pv_moves, Move.NULL);
     }
 
     // order:
@@ -215,7 +216,9 @@ pub const SearchThread = struct {
         var tt_move: ?Move = null;
 
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
-            if (tt_entry.bound == .exact or tt_entry.score >= beta and tt_entry.bound == .lower or tt_entry.score < root_alpha and tt_entry.bound == .upper) {
+            if (tt_entry.bound == .exact or 
+                tt_entry.bound == .lower and tt_entry.score >= beta or
+                tt_entry.bound == .upper and tt_entry.score <= root_alpha) {
                 return tt_entry.score;
             }
 
@@ -225,7 +228,7 @@ pub const SearchThread = struct {
         const static_eval = self.evalPosition();
 
         // TODO make something about that?
-        if (ply == MAX_DEPTH)
+        if (ply >= MAX_PLY)
             return static_eval;
 
         var eval = static_eval;
@@ -324,10 +327,11 @@ pub const SearchThread = struct {
     }
 
     fn perPlyPv(self: *Self, ply: u32) []Move {
-        const count = MAX_DEPTH - ply;
+        const count = MAX_PLY - ply;
         const start = self.pv_moves.len - (count + 1) * count / 2;
         return self.pv_moves[start..start+count];
     }
+
 
     fn setNewPvMoveAtPly(self: *Self, move: Move, ply: u32) void {
         const pv = self.perPlyPv(ply);
@@ -345,7 +349,7 @@ pub const SearchThread = struct {
         ply: u32,
         extensions_used: u32,
     ) i16 {
-        if (self.is_exiting_search.load(.unordered)) {
+        if (ply > 0 and self.is_exiting_search.load(.unordered)) {
             return 0;
         }
 
@@ -360,10 +364,11 @@ pub const SearchThread = struct {
         const is_pv_node = node_type == .Pv;
         std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
 
-        if (is_pv_node) {
-            // TODO be smarter with that, do less work?
-            @memset(self.perPlyPv(ply), Move.NULL);
-        }
+        // TODO be smarter with that, do less work?
+        @memset(self.perPlyPv(ply), Move.NULL);
+        // const count = MAX_PLY - ply;
+        // const start = self.pv_moves.len - (count + 1) * count / 2;
+        // @memset(self.pv_moves[start..], Move.NULL);
 
         self.nodes += 1;
 
@@ -386,31 +391,25 @@ pub const SearchThread = struct {
         var tt_move: ?Move = null;
 
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
-            if (tt_entry.depth >= remaining_depth and ply > 0) { 
-                if (tt_entry.bound == .exact or tt_entry.score >= beta and tt_entry.bound == .lower or tt_entry.score < root_alpha and tt_entry.bound == .upper) {
+            if (!is_pv_node and tt_entry.depth >= remaining_depth and ply > 0) { 
+                if (tt_entry.bound == .exact or 
+                    tt_entry.bound == .lower and tt_entry.score >= beta or
+                    tt_entry.bound == .upper and tt_entry.score <= root_alpha) {
                     return tt_entry.score;
                 }
             }
 
-            if (tt_entry.move != Move.NULL) {
-                tt_move = tt_entry.move;
-            }
+            tt_move = tt_entry.move;
         }
 
         const static_eval = self.quiescenceSearch(node_type, alpha, beta, ply);
-        if (static_eval == -SCORE_INFINITY) {
-            var buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
-            std.debug.print("{s}\n", .{board.writeFen(&buf, self.brd.data)});
-            std.debug.assert(false);
-        }
-        if (self.is_exiting_search.load(.unordered)) {
+        if (ply > 0 and self.is_exiting_search.load(.unordered)) {
             // TODO?
             return 0;
         }
 
-
         // TODO make something about that?
-        if (ply == MAX_DEPTH)
+        if (ply >= MAX_PLY)
             return static_eval;
 
         var eval = -SCORE_INFINITY;
@@ -450,6 +449,8 @@ pub const SearchThread = struct {
         var tt_bound: tt.Bound = .upper;
 
         for (0.., moves.moves()) |i, move| {
+            std.debug.assert(self.perPlyPv(ply)[0] == best_move);
+
             if (self.brd.makeMove(move))
                 continue;
 
@@ -477,7 +478,7 @@ pub const SearchThread = struct {
 
             self.brd.unmakeMove();
 
-            if (self.is_exiting_search.load(.unordered)) {
+            if (ply > 0 and self.is_exiting_search.load(.unordered)) {
                 break;
             }
 
@@ -487,9 +488,7 @@ pub const SearchThread = struct {
                 }
                 eval = move_eval;
                 best_move = move;
-                if (is_pv_node) {
-                    self.setNewPvMoveAtPly(move, ply);
-                }
+                self.setNewPvMoveAtPly(move, ply);
 
                 tt_bound = .lower;
                 break;
@@ -498,9 +497,7 @@ pub const SearchThread = struct {
             if (move_eval > eval) {
                 eval = move_eval;
                 best_move = move;
-                if (is_pv_node) {
-                    self.setNewPvMoveAtPly(move, ply);
-                }
+                self.setNewPvMoveAtPly(move, ply);
 
                 if (eval > alpha) { 
                     alpha = eval;
@@ -531,9 +528,10 @@ pub const SearchThread = struct {
         }
 
         std.debug.assert(ply != 0 or best_move != Move.NULL);
+        std.debug.assert(self.perPlyPv(ply)[0] == best_move);
 
         // prevent storing to tt 
-        if (self.is_exiting_search.load(.unordered)) {
+        if (ply > 0 and self.is_exiting_search.load(.unordered)) {
             // TODO save to TT as lower bound instead
             return 0;
         }
@@ -551,7 +549,7 @@ pub const SearchThread = struct {
     pub fn bestMove(self: *Self, brd: *Board, uci_connection: *uci.UciConnection, time_controls: TimeControls) !void {
         self.brd = brd;
 
-        var depth_target: u32 = MAX_DEPTH;
+        var depth_target: u32 = MAX_PLY;
         var available_time: u64 = MAX_THINKING_TIME_NS;
 
         switch (time_controls) {
@@ -563,21 +561,18 @@ pub const SearchThread = struct {
         self.available_time = available_time;
         self.search_start = std.time.Instant.now() catch unreachable;
         
-        // make full search at least to depth 1 to have move to play
         self.history.setToZero();
 
-        var score: i32 = 0;
         var best_move: Move = .NULL;
 
         var d: u32 = 0;
-
         while (true) {
             d += 1;
 
             self.preSearchCleanup();
 
             const search_iteration_beg = std.time.Instant.now() catch unreachable;
-            const this_iteration_score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0);
+            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0);
             const search_iteration_end = std.time.Instant.now() catch unreachable;
             const iteration_time = search_iteration_end.since(search_iteration_beg);
 
@@ -592,16 +587,15 @@ pub const SearchThread = struct {
 
             try uci_connection.searchInfo(info); 
 
-            // for now don't trust unfinished iterations
-            if (self.is_exiting_search.load(.unordered)) {
-                break;
+            // for now don't trust unfinished iterations if ply > 0
+            const is_exiting = d >= depth_target or self.is_exiting_search.load(.unordered);
+
+            if (!is_exiting or d == 1) {
+                best_move = self.perPlyPv(0)[0];
+                std.debug.assert(best_move != Move.NULL);
             }
 
-            score = this_iteration_score;
-            best_move = self.perPlyPv(0)[0];
-            std.debug.assert(best_move != Move.NULL);
-
-            if (d >= depth_target) {
+            if (is_exiting) {
                 break;
             }
         }

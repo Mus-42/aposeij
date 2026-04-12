@@ -236,15 +236,29 @@ pub const UciConnection = struct {
     }
 
     fn writeSearchInfo(self: *Self, info: SearchInfo) !void {
-        try self.stdout.print("info depth {[depth]} nodes {[nodes]} nps {[nps]} time {[time]} ", .{
+        try self.stdout.print("info depth {[depth]:2} nodes {[nodes]:8} nps {[nps]:8} time {[time]:6} ", .{
             .depth = info.depth,
             .nodes = info.nodes,
             .nps = info.nps,
             .time = info.time_ms,
         });
+        
+        const mate_ply = search.SCORE_MATE_ABS - @abs(info.score);
+        if (mate_ply <= search.SCORE_MATE_EPS) {
+            const mate_dist = (1 + mate_ply) / 2;
+            const is_winning = info.score > 0;
+            // std.debug.assert(is_winning == (mate_ply % 2 == 1));
+            const sign: u8 = if (is_winning) '+' else '-';
+            var buf: [8]u8 = undefined;
+            var stream = std.Io.fixedBufferStream(&buf);
+            try stream.writer().print("{c}{d}", .{sign, mate_dist});
+            const mate_string = buf[0..stream.pos];
+            try self.stdout.print("score mate {s:6}", .{mate_string});
+            // try self.stdout.print("score mate {d:6}", .{mate_ply});
+        } else {
+            try self.stdout.print("score cp {d:8}", .{info.score});
+        }
 
-        // TODO score mate
-        try self.stdout.print("score cp {d}", .{info.score});
 
         if (info.pv.len > 0) {
             try self.stdout.writeAll(" pv");

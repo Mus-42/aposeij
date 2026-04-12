@@ -1,16 +1,17 @@
 const std = @import("std");
 const board = @import("board");
+const search = @import("search.zig");
 
 const Alloc = std.mem.Allocator;
 const Move = board.Move;
 
 pub const TTEntry = struct {
     // lower 16 bits of tt key
-    key_low: u16 = 0,
-    depth: u8 = 0,
-    score: i16 = 0,
-    move: Move = .NULL,
-    bound: Bound = .lower, 
+    key_low: u16,
+    depth: u8,
+    score: i16,
+    move: Move,
+    bound: Bound, 
 };
 
 pub const TTBucket = struct {
@@ -25,7 +26,7 @@ comptime {
 }
 
 pub const Bound = enum (u2) {
-    lower = 0,
+    lower,
     exact,
     upper,
 };
@@ -43,45 +44,82 @@ pub const TTable = struct {
         const size_buckets = (TT_DEFAULT_SIZE_MB << 20) / @sizeOf(TTBucket);
 
         const tt = try alloc.alloc(TTBucket, size_buckets);
-        @memset(tt, .{ .entries = [1]TTEntry{ .{} } ** 4 });
 
-        return .{ .buckets = tt };
+        var self: Self = .{ .buckets = tt };
+        self.clear();
+
+        return self;
+    }
+
+    pub fn clear(self: *Self) void {
+        @memset(std.mem.sliceAsBytes(self.buckets), 0);
     }
 
     pub fn deinit(self: *Self, alloc: Alloc) void {
         alloc.free(self.buckets);
     }
 
-    // TODO resize
-    
+    // TODO resize function
+
+    fn isMateScore(score: i16) bool {
+        const abs_score: i16 = @intCast(@abs(score));
+        return search.SCORE_MATE_ABS - abs_score <= search.SCORE_MATE_EPS;
+    }
+
+    // A:
+    // (old_ply - MATE_ABS) - old_ply + new_ply
+    // B:
+    // (MATE_ABS - old_ply) + old_ply - new_ply
+
+    fn restoreScore(stored_score: i16, ply: u32) i16 {
+        var score = stored_score;
+        if (isMateScore(score)) {
+            if (score > 0) {
+                score -= @intCast(ply);
+            } else {
+                score += @intCast(ply);
+            }
+        }
+        return score;
+    }
+
+    fn storeScore(raw_score: i16, ply: u32) i16 {
+        var score = raw_score;
+        if (isMateScore(score)) {
+            if (score > 0) {
+                score += @intCast(ply);
+            } else {
+                score -= @intCast(ply);
+            }
+        }
+        return score;
+    }
+
     fn indicies(self: *const Self, zobrist_key: u64) struct { u32, u16 } {
         // TODO pick a better one?
         const TT_MAGICK = 0x35C25ADD731CCD89;
         const key: u64 = (zobrist_key *% TT_MAGICK) >> 8;
-        const index: u32 = @intCast(key >> 16 & (self.buckets.len - 1));
+        const index: u32 = @intCast((key >> 16) % self.buckets.len);
         const lower_key: u16 = @intCast(key & 0xFFFF);
         return .{ index, lower_key };
     }
 
-    pub fn probe(self: *const Self, zobrist_key: u64, ply: u32) ?*const TTEntry {
-        // TODO correct mate score
-        _ = ply; 
-
+    pub fn probe(self: *const Self, zobrist_key: u64, ply: u32) ?TTEntry {
         const tt_index, const lower_key = self.indicies(zobrist_key);
         const tt_bucket = &self.buckets[tt_index];
 
-        for (&tt_bucket.entries) |*tt_entry| {
-            if (tt_entry.key_low == lower_key)
-                return tt_entry;
+        for (&tt_bucket.entries) |tt_entry| {
+            if (tt_entry.key_low == lower_key) {
+                var entry = tt_entry;
+                entry.score = restoreScore(entry.score, ply);
+                return entry;
+            }
         }
 
         return null;
     }
 
     pub fn put(self: *Self, zobrist_key: u64, ply: u32, depth: u8, score: i16, bound: Bound, move: Move) void {
-        // TODO correct mate score
-        _ = ply; 
-
         const tt_index, const lower_key = self.indicies(zobrist_key);
         const tt_bucket = &self.buckets[tt_index];
 
@@ -105,8 +143,7 @@ pub const TTable = struct {
         entry_location.?.* = .{
             .move = move,
             .key_low = lower_key,
-            //.is_occupied = true,
-            .score = score,
+            .score = storeScore(score, ply),
             .depth = depth,
             .bound = bound,
         };

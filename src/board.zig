@@ -373,6 +373,7 @@ pub const Board = struct {
         self.clearHistory();
         self.data = bd;
         self.data.recomputeZobristKey();
+        self.data.is_in_check = self.data.computeIsInCheck();
     }
     
     pub fn clearHistory(self: *Self) void {
@@ -693,8 +694,8 @@ pub const Move = packed struct (u16) {
 
     const Self = @This();
 
-    // acutally impossible move
-    pub const NULL: Self = .{ .from = 0, .to = 0, .is_promotion = true, .is_capture = true, .extra = .{ .quiet = .none }};
+    pub const NULL: Self = @bitCast(@as(u16, 0));
+    // pub const NULL: Self = .{ .from = 0, .to = 0, .is_promotion = false, .is_capture = false, .extra = .{ .quiet = .none }};
 
     pub fn isLooksLikePawn2SquareMove(self: Self) bool {
         const move_mask = @as(u64, 1) << self.to | @as(u64, 1) << self.from;
