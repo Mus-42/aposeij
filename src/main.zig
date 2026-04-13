@@ -11,7 +11,7 @@ var stdin_buf: [uci.MAX_COMMAND_LEN]u8 = undefined;
 var stdout_buf: [256]u8 = undefined;
 
 pub fn main() !void {
-    // TODO use real allocator here
+    // TODO use real allocator here in release builds
     var debug_alloc = std.heap.DebugAllocator(.{}).init;
     defer std.debug.assert(debug_alloc.deinit() == .ok);
     const alloc = debug_alloc.allocator();
@@ -19,7 +19,10 @@ pub fn main() !void {
     var stdin = std.fs.File.stdin().reader(&stdin_buf);
     var stdout = std.fs.File.stdout().writer(&stdout_buf);
 
-    var uci_connection = uci.UciConnection.init(&stdin.interface, &stdout.interface);
+    // TODO cli option to override
+    const strict_mode = std.fs.File.stdin().isTty();
+
+    var uci_connection = uci.UciConnection.init(&stdin.interface, &stdout.interface, .{ .strict_mode = strict_mode });
     defer uci_connection.deinit(); 
 
     var brd = try board.Board.init(alloc, .DEFAULT);
@@ -41,6 +44,7 @@ pub fn main() !void {
 
         switch (command.command) {
             .uci => try uci_connection.uciok(),
+            .setoption => {},
             .isready => {
                 try control.waitUntilSearchEnded();
                 try uci_connection.readyok();
@@ -53,29 +57,32 @@ pub fn main() !void {
                 try control.waitUntilSearchEnded();
                 try control.startSearch(&brd, time_controls);
             },
+            .ponderhit => {},
             .ucinewgame => {
                 try control.signalStopSearch();
                 try control.waitUntilSearchEnded();
             },
             .displaypos => {
-                brd.data.debugPrint();
+                try brd.data.debugPrint(uci_connection.stdout);
                 var buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
-                std.debug.print("{s}\n", .{board.writeFen(&buf, brd.data)});
-                std.debug.print("key: {x}\n", .{brd.data.zobrist_key});
+                try uci_connection.stdout.print("{s}\n", .{board.writeFen(&buf, brd.data)});
+                try uci_connection.stdout.print("key: {x}\n", .{brd.data.zobrist_key});
+                try uci_connection.stdout.flush();
             },
-            .perft, .perft_nonbulk => {
-                const is_bulk = command.command == .perft;
+            .help => {
+                try uci_connection.stdout.writeAll(uci.HELP);
+                try uci_connection.stdout.flush();
+            },
+            .perft => {
                 const depth = std.fmt.parseInt(u32, command.arguments, 10) catch {
-                    std.debug.print("usage: perft [DEPTH]\n", .{});
+                    try uci_connection.stdout.print("usage: perft [DEPTH]\n", .{});
+                    try uci_connection.stdout.flush();
                     continue;
                 };
                 uci_connection.lockStdout();
                 defer uci_connection.unlockStdout();
                 const beg = try std.time.Instant.now();
-                const nodes = if (is_bulk) 
-                    try perft_root(true, &brd, depth, uci_connection.stdout)
-                else
-                    try perft_root(false, &brd, depth, uci_connection.stdout);
+                const nodes = try perft_root(&brd, depth, uci_connection.stdout);
                 const end = try std.time.Instant.now();
                 const duration = @as(f64, @floatFromInt(end.since(beg))) * (1 / @as(f64, std.time.ns_per_s));
                 const nps = @as(f64, @floatFromInt(nodes)) / duration;
@@ -86,7 +93,11 @@ pub fn main() !void {
             .bench => {
                 try bench(alloc, uci_connection.stdout);
             },
-            else => {},
+            .unknown => {
+                if (!uci_connection.options.strict_mode) continue;
+                try uci_connection.stdout.print("Unknown command `{s}`\n", .{command.command_full_str});
+                try uci_connection.stdout.flush();
+            },
         }
     }
 }
@@ -126,7 +137,7 @@ fn bench(alloc: Alloc, output: *std.Io.Writer) !void {
         },
         .buffer = &.{},
     };
-    var dummy_connection: uci.UciConnection = .init(&dummy_reader, &dummy_writer);
+    var dummy_connection: uci.UciConnection = .init(&dummy_reader, &dummy_writer, .{});
     defer dummy_connection.deinit();
 
     const search_time_controls = search.TimeControls { .to_depth = .{ .target = 8 } };
@@ -147,7 +158,7 @@ fn bench(alloc: Alloc, output: *std.Io.Writer) !void {
     try output.flush();
 }
 
-fn perft_root(comptime is_bulk: bool, brd: *board.Board, remaining_depth: u32, output: *std.Io.Writer) !u64 {
+fn perft_root(brd: *board.Board, remaining_depth: u32, output: *std.Io.Writer) !u64 {
     if (remaining_depth == 0) {
         return 1;
     }
@@ -167,7 +178,7 @@ fn perft_root(comptime is_bulk: bool, brd: *board.Board, remaining_depth: u32, o
     for (moves.moves()) |move| {
         if (brd.makeMove(move))
             continue;
-        const per_move_count = perft(is_bulk, brd, remaining_depth - 1);
+        const per_move_count = perft(brd, remaining_depth - 1);
         try output.print("{s} - {d}\n", .{move.algebraicNotation().toStr(), per_move_count});
         nodes_count += per_move_count;
         brd.unmakeMove();
@@ -176,7 +187,7 @@ fn perft_root(comptime is_bulk: bool, brd: *board.Board, remaining_depth: u32, o
     return nodes_count;
 }
 
-fn perft(comptime is_bulk: bool, brd: *board.Board, remaining_depth: u32) u64 {
+fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     if (remaining_depth == 0) {
         return 1;
     }
@@ -188,7 +199,7 @@ fn perft(comptime is_bulk: bool, brd: *board.Board, remaining_depth: u32) u64 {
     for (moves.moves()) |move| {
         if (brd.makeMove(move))
             continue;
-        nodes_count += perft(is_bulk, brd, remaining_depth - 1);
+        nodes_count += perft(brd, remaining_depth - 1);
         brd.unmakeMove();
     }
 

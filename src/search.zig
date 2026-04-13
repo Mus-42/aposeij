@@ -28,6 +28,7 @@ pub const NodeType = enum {
 
 pub const TimeControls = union (enum) {
     infinite,
+    nodes: struct { hard_limit: u64 },
     time_remaining: struct { ns: u64 },
     to_depth: struct { target: u32 },
 };
@@ -554,6 +555,7 @@ pub const SearchThread = struct {
 
         switch (time_controls) {
             .infinite => {},
+            .nodes => @panic("TODO: go nodes"),
             .to_depth => |c| depth_target = @min(depth_target, @max(c.target, 1)),
             .time_remaining => |c| available_time = @min(available_time, c.ns),
         }
@@ -576,20 +578,24 @@ pub const SearchThread = struct {
             const search_iteration_end = std.time.Instant.now() catch unreachable;
             const iteration_time = search_iteration_end.since(search_iteration_beg);
 
-            const info: uci.SearchInfo = .{
-                .depth = d,
-                .time_ms = iteration_time / std.time.ns_per_ms,
-                .nodes = self.nodes,
-                .nps =  @as(u64, @intCast(@as(u96, self.nodes) * std.time.ns_per_s / @max(iteration_time, 1))),
-                .pv = trimInvalidPvMoves(self.perPlyPv(0)),
-                .score = score,
-            };
+            const is_canceled = self.is_exiting_search.load(.unordered);
 
-            try uci_connection.searchInfo(info); 
+            if (!is_canceled) {
+                const info: uci.SearchInfo = .{
+                    .depth = d,
+                    .time_ms = iteration_time / std.time.ns_per_ms,
+                    .nodes = self.nodes,
+                    .nps =  @as(u64, @intCast(@as(u96, self.nodes) * std.time.ns_per_s / @max(iteration_time, 1))),
+                    .pv = trimInvalidPvMoves(self.perPlyPv(0)),
+                    .score = score,
+                };
+
+                try uci_connection.searchInfo(info); 
+            }
+
+            const is_exiting = d >= depth_target or is_canceled;
 
             // for now don't trust unfinished iterations if ply > 0
-            const is_exiting = d >= depth_target or self.is_exiting_search.load(.unordered);
-
             if (!is_exiting or d == 1) {
                 best_move = self.perPlyPv(0)[0];
                 std.debug.assert(best_move != Move.NULL);

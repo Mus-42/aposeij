@@ -184,17 +184,17 @@ pub const Board = struct {
             self.pieces[@intFromEnum(piece)] |= @as(u64, 1) << square;
         }
 
-        pub fn debugPrint(self: BoardData) void {
+        pub fn debugPrint(self: BoardData, sink: *std.io.Writer) !void {
             for (0..8) |ri| {
                 const r = 7 - ri;
                 for (0..8) |f| {
                     if (self.getPieceAt(@intCast(r * 8 + f))) |p| {
-                        std.debug.print("{c} ", .{FEN_PIECE_TO_CHAR[@intFromEnum(p)]});
+                        try sink.print("{c} ", .{FEN_PIECE_TO_CHAR[@intFromEnum(p)]});
                     } else {
-                        std.debug.print(". ", .{});
+                        try sink.print(". ", .{});
                     }
                 }
-                std.debug.print("\n", .{});
+                try sink.print("\n", .{});
             }
         }
 
@@ -428,6 +428,8 @@ test stringToSquare {
 pub const FenReadError = error{ IncompleteFenData, InvalidFenCharacter } || ToSquareError;
 
 pub fn readFen(s: []const u8) FenReadError!Board.BoardData {
+    if (s.len <= 8) return error.IncompleteFenData;
+
     var board = Board.BoardData.EMPTY;
     var i: usize = 0;
 
