@@ -29,7 +29,8 @@ pub const HELP =
     \\
     \\Custom/Debug commands:
     \\  displaypos                                                  debug print postion, fen string, position hash
-    \\  perft DEPTH                                                 run perft test DEPTH moves deep
+    \\  perft DEPTH                                                 run perft test DEPTH moves deep in current positon
+    \\  run_testsusite [TESTSUITE]                                  run perft test on testsuite TESTSUITE (by default: testfiles/perft.testsuite)
     \\  bench                                                       run small benchmark to estimate engine speed on current machine
     \\
     ;
@@ -55,6 +56,7 @@ pub const UciCommand = enum {
     displaypos,
     help,
     perft,
+    run_testsuite,
     bench,
     
     unknown,
@@ -72,7 +74,7 @@ pub const SearchInfo = struct {
     nodes: u64,
     nps: u64,
     pv: []const Move,
-    score: i32,
+    score: i16,
 };
 
 pub const MAX_COMMAND_LEN = 8192;
@@ -110,8 +112,6 @@ pub const UciConnection = struct {
             try self.stdin.rebase(MAX_COMMAND_LEN);
             const command_full = try self.stdin.takeDelimiterInclusive('\n');
             const command_string = std.mem.trim(u8, command_full, &std.ascii.whitespace);
-            if (command_string.len == 0) 
-                continue;
             var command_parts = std.mem.splitAny(u8, command_string, &std.ascii.whitespace);
             const name = command_parts.next() orelse continue;
             const command = std.meta.stringToEnum(UciCommand, name) orelse .unknown;
@@ -336,9 +336,7 @@ pub const UciConnection = struct {
             .time = info.time_ms,
         });
         
-        const mate_ply = search.SCORE_MATE_ABS - @abs(info.score);
-        if (mate_ply <= search.SCORE_MATE_EPS) {
-            const mate_dist = (1 + mate_ply) / 2;
+        if (search.scoreToMateInMovesAbs(info.score)) |mate_dist| {
             const is_winning = info.score > 0;
             // std.debug.assert(is_winning == (mate_ply % 2 == 1));
             const sign: u8 = if (is_winning) '+' else '-';

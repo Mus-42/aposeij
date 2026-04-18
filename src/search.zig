@@ -15,11 +15,28 @@ pub const MAX_EXTENSIONS = 8;
 
 pub const QS_TT_DEPTH = 0;
 
-pub const SCORE_MATE_ABS: i16 = 32000;
-pub const SCORE_MATE_EPS: i16 = MAX_PLY;
-pub const SCORE_INFINITY: i16 = SCORE_MATE_ABS+1;
+pub const SCORE_MATE_ABS = 32000;
+pub const SCORE_MATE_EPS = MAX_PLY;
+pub const SCORE_INFINITY = SCORE_MATE_ABS+1;
 
 pub const TIME_EPS_NS: u64 = 200;
+
+pub fn scoreToMateInPlyAbs(score: i16) ?u16 {
+    const mate_ply = SCORE_MATE_ABS - @abs(score);
+    if (mate_ply > SCORE_MATE_EPS) return null;
+    return mate_ply;
+}
+
+
+pub fn plyToMoves(ply: u16) u16 {
+    return (1 + ply) / 2;
+}
+
+pub fn scoreToMateInMovesAbs(score: i16) ?u16 {
+    const mate_ply = SCORE_MATE_ABS - @abs(score);
+    if (mate_ply > SCORE_MATE_EPS) return null;
+    return plyToMoves(mate_ply);
+}
 
 pub const NodeType = enum {
     Pv,
@@ -192,7 +209,7 @@ pub const SearchThread = struct {
         std.mem.sortUnstableContext(0, moves.len, Context { .bot = self, .moves = moves, .scores = scores });
     }
 
-    fn quiescenceSearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, root_beta: i16, ply: u32) i16 {
+    fn qsearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, root_beta: i16, ply: u32) i16 {
         if (self.is_exiting_search.load(.unordered)) {
             return 0;
         }
@@ -217,9 +234,9 @@ pub const SearchThread = struct {
         var tt_move: ?Move = null;
 
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
-            if (tt_entry.bound == .exact or 
+            if (!is_pv_node and (tt_entry.bound == .exact or 
                 tt_entry.bound == .lower and tt_entry.score >= beta or
-                tt_entry.bound == .upper and tt_entry.score <= root_alpha) {
+                tt_entry.bound == .upper and tt_entry.score <= alpha)) {
                 return tt_entry.score;
             }
 
@@ -244,20 +261,13 @@ pub const SearchThread = struct {
         var moves = board.Moves{};
         board.genMoves(self.brd.data, &moves);
 
-        if (moves.count() == 0) {
-            if (self.brd.data.is_in_check) {
-                return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
-            }
-            return 0;
-        }
-
+    
+        // if (!self.brd.data.is_in_check) {
+        //     moves.filterCapturesOnly();
+        // }
         moves.filterCapturesOnly();
 
-        const moves_len = moves.moves().len;
-
-        if (moves_len == 0) {
-            return static_eval;
-        }
+        const moves_len = moves.count();
         
         var scores_buf: [board.MAX_MOVES]i16 = undefined;
         const scores = scores_buf[0..moves_len];
@@ -269,13 +279,23 @@ pub const SearchThread = struct {
         var has_moves = false;
 
         for (moves.moves()) |move| {
-            std.debug.assert(move.is_capture);
 
             if (self.brd.makeMove(move))
                 continue;
+
+
             has_moves = true;
 
-            const move_eval = -self.quiescenceSearch(node_type, -beta, -alpha, ply+1);
+            // TODO
+            // if (!move.is_capture) {
+            //     // TODO
+            //     self.brd.unmakeMove();
+            //     continue;
+            // }
+
+
+            std.debug.assert(move.is_capture);
+            const move_eval = -self.qsearch(node_type, -beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
             if (self.is_exiting_search.load(.unordered)) {
@@ -303,11 +323,12 @@ pub const SearchThread = struct {
 
         // No legal moves
         // TODO smarter condition
+        // TODO that doesn't work becasue we skipping quiet moves in qsearch
         if (!has_moves) {
             if (self.brd.data.is_in_check) {
                 return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
             }
-            return 0;
+            return eval;
         }
 
         if (self.is_exiting_search.load(.unordered)) {
@@ -333,6 +354,9 @@ pub const SearchThread = struct {
         return self.pv_moves[start..start+count];
     }
 
+    fn clearPvAt(self: *Self, ply: u32) void {
+        self.perPlyPv(ply)[0] = Move.NULL;
+    }
 
     fn setNewPvMoveAtPly(self: *Self, move: Move, ply: u32) void {
         const pv = self.perPlyPv(ply);
@@ -366,7 +390,7 @@ pub const SearchThread = struct {
         std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
 
         // TODO be smarter with that, do less work?
-        @memset(self.perPlyPv(ply), Move.NULL);
+        self.clearPvAt(ply);
         // const count = MAX_PLY - ply;
         // const start = self.pv_moves.len - (count + 1) * count / 2;
         // @memset(self.pv_moves[start..], Move.NULL);
@@ -403,7 +427,7 @@ pub const SearchThread = struct {
             tt_move = tt_entry.move;
         }
 
-        const static_eval = self.quiescenceSearch(node_type, alpha, beta, ply);
+        const static_eval = self.qsearch(node_type, alpha, beta, ply);
         if (ply > 0 and self.is_exiting_search.load(.unordered)) {
             // TODO?
             return 0;
@@ -413,7 +437,7 @@ pub const SearchThread = struct {
         if (ply >= MAX_PLY)
             return static_eval;
 
-        var eval = -SCORE_INFINITY;
+        var eval: i16 = -SCORE_INFINITY;
 
         if (!is_pv_node and !self.brd.data.is_in_check and @abs(alpha) < 2000) {
             const margin = @as(i16, @intCast(150 * remaining_depth));
@@ -432,7 +456,7 @@ pub const SearchThread = struct {
         var moves = board.Moves{};
         board.genMoves(self.brd.data, &moves);
 
-        const moves_len = moves.moves().len;
+        const moves_len = moves.count();
 
         if (moves_len == 0) {
             if (self.brd.data.is_in_check) {
@@ -608,6 +632,40 @@ pub const SearchThread = struct {
 
         std.debug.assert(best_move != Move.NULL);
         try uci_connection.bestmove(best_move);
+    }
+
+    pub fn searchToMate(self: *Self, brd: *Board, time_limit_ns: u64) !u32 {
+        self.brd = brd;
+
+        self.available_time = time_limit_ns;
+        self.search_start = std.time.Instant.now() catch unreachable;
+        
+        self.history.setToZero();
+
+        var depth_limit: u32 = MAX_PLY;
+        var found_at: u16 = MAX_PLY;
+
+        var d: u32 = 0;
+        while (d < depth_limit) {
+            d += 1;
+
+            self.preSearchCleanup();
+
+            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0);
+            const is_canceled = self.is_exiting_search.load(.unordered);
+            
+            if (is_canceled) {
+                return error.TimeExpired;
+            }
+            
+            if (scoreToMateInPlyAbs(score)) |mate_at_ply| {
+                found_at = @min(found_at, mate_at_ply);
+                // TODO smarter depth limit
+                depth_limit = @min(depth_limit, mate_at_ply+6);
+            }
+        }
+
+        return plyToMoves(found_at);
     }
 };
 

@@ -90,6 +90,13 @@ pub fn main() !void {
                 try uci_connection.stdout.print("nps: {d}\n", .{nps});
                 try uci_connection.stdout.flush();
             },
+            .run_testsuite => {
+                var filename = std.mem.trim(u8, command.arguments, &std.ascii.whitespace);
+                if (filename.len == 0) {
+                    filename = "testfiles/perft.testsuite";
+                }
+                try run_testsuite(alloc, filename, uci_connection.stdout);
+            },
             .bench => {
                 try bench(alloc, uci_connection.stdout);
             },
@@ -204,4 +211,121 @@ fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     }
 
     return nodes_count;
+}
+
+fn run_testsuite(alloc: Alloc, filename: []const u8, output: *std.Io.Writer) !void {
+    var file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+        try output.print("failed to open testsuite file {s}: {}\n", .{filename, err});
+        try output.flush();
+        return;
+    };
+    defer file.close();
+
+    try output.print("Running testsuite {s}\n", .{filename});
+    try output.flush();
+
+    const READER_BUF_SIZE = 1024;
+    var reader_buf: [READER_BUF_SIZE]u8 = undefined;
+    var fen_buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
+    var file_reader = file.reader(&reader_buf);
+    const reader = &file_reader.interface;
+
+    var total: u32 = 0;
+    var passed: u32 = 0;
+    var skipped: u32 = 0;
+
+    var bd = board.Board.BoardData.DEFAULT;
+
+    var search_thread = try search.SearchThread.init(alloc);
+    defer search_thread.deinit();
+
+    var brd = try board.Board.init(alloc, .DEFAULT);
+    defer brd.deinit();
+
+    while (true) {
+        try reader.rebase(READER_BUF_SIZE);
+        const command_raw = reader.takeDelimiterInclusive('\n') catch |err| {
+            if (err == error.EndOfStream) break;
+            return err;
+        };
+        const command = std.mem.trim(u8, command_raw, &std.ascii.whitespace);
+        var command_parts = std.mem.splitAny(u8, command, &std.ascii.whitespace);
+        const name = command_parts.next() orelse continue;
+
+        if (std.mem.eql(u8, name, "fen")) {
+            const fen = std.mem.trim(u8, command_parts.rest(), &std.ascii.whitespace);
+            bd = board.readFen(fen) catch |err| {
+                try output.print("failed to parse fen string `{s}`: `{}`\n", .{fen, err});
+                try output.flush();
+                skipped += 1;
+                continue;
+            };
+        } else if (std.mem.eql(u8, name, "test_mate")) {
+            const fen = board.writeFen(&fen_buf, bd);
+            const expected_moves_str = std.mem.trim(u8, command_parts.rest(), &std.ascii.whitespace);
+            const expected_moves = try std.fmt.parseInt(u32, expected_moves_str, 10);
+
+            brd.setBoardData(bd);
+
+            const TIME_LIMIT = std.time.ns_per_s * 20;
+            search_thread.is_exiting_search.store(false, .release);
+            const mate_in = search_thread.searchToMate(&brd, TIME_LIMIT) catch |err| {
+                switch (err) {
+                    error.TimeExpired => {
+                        try output.print("failed by time mate in x for fen {s}\n", .{fen});
+                        try output.flush();
+                        total += 1;
+                        continue;
+                    }
+                }
+            };
+
+
+            if (expected_moves == mate_in) {
+                try output.print("passed mate in x for fen {s}\n", .{fen});
+                try output.flush();
+                passed += 1;
+            } else {
+                try output.print("failed mate in x for fen {s}. expected mate in {}, found in {}\n", .{fen, expected_moves, mate_in});
+                try output.flush();
+            }
+            total += 1;
+        } else if (std.mem.eql(u8, name, "test_perft")) {
+            const fen = board.writeFen(&fen_buf, bd);
+            var is_passed = true;
+            while (command_parts.next()) |perft_test| {
+                var test_parts = std.mem.splitScalar(u8, perft_test, ':');
+                const depth_str = test_parts.next() orelse continue;
+                const expected_count_str = test_parts.next() orelse continue;
+
+                const depth = try std.fmt.parseInt(u32, depth_str, 10);
+                const expected_count = try std.fmt.parseInt(u32, expected_count_str, 10);
+
+                var b = try board.Board.init(alloc, bd);
+                defer b.deinit();
+
+                const count = perft(&b, depth);
+                
+                if (count != expected_count) {
+                    is_passed = false;
+                    try output.print("perft for fen {s} failed at depth {d}. expected count {d} but computed {d}\n", .{fen, depth, expected_count, count});
+                    try output.flush();
+                    break;
+                }
+            }
+            if (is_passed) {
+                try output.print("passed perft fen {s}\n", .{fen});
+                try output.flush();
+                passed += 1;
+            }
+            total += 1;
+        } else {
+            try output.print("unknown testsuite command `{s}`\n", .{name});
+            try output.flush();
+            skipped += 1;
+            continue;
+        }
+    }
+    try output.print("passed {d} of {d} ({d:.1}%), {d} tests skipped\n", .{passed, total, @as(f64, @floatFromInt(passed)) / @as(f64, @floatFromInt(total)) * 100, skipped});
+    try output.flush();
 }
