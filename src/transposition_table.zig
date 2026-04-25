@@ -7,7 +7,6 @@ const Move = board.Move;
 
 pub const TTEntry = struct {
     // lower 16 bits of tt key
-    key_low: u16,
     depth: u8,
     score: i16,
     move: Move,
@@ -15,11 +14,12 @@ pub const TTEntry = struct {
 };
 
 pub const TTBucket = struct {
-    entries: [4]TTEntry align(32),
+    key_low: [4]u16 align(32),
+    entries: [4]TTEntry,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(TTEntry) == 8);
+    std.debug.assert(@sizeOf(TTEntry) == 6);
     std.debug.assert(@alignOf(TTEntry) == 2);
     std.debug.assert(@sizeOf(TTBucket) == 32);
     std.debug.assert(@alignOf(TTBucket) == 32);
@@ -108,41 +108,44 @@ pub const TTable = struct {
         const tt_index, const lower_key = self.indicies(zobrist_key);
         const tt_bucket = &self.buckets[tt_index];
 
-        for (&tt_bucket.entries) |tt_entry| {
-            if (tt_entry.key_low == lower_key) {
-                var entry = tt_entry;
-                entry.score = restoreScore(entry.score, ply);
-                return entry;
+        var pos: usize = 4;
+        inline for (0..4) |i| {
+            if (tt_bucket.key_low[i] == lower_key) {
+                pos = i;
+                break;
             }
         }
 
-        return null;
+        if (pos >= 4) return null;
+        var entry = tt_bucket.entries[pos];
+        entry.score = restoreScore(entry.score, ply);
+        return entry;
     }
 
     pub fn put(self: *Self, zobrist_key: u64, ply: u32, depth: u8, score: i16, bound: Bound, move: Move) void {
         const tt_index, const lower_key = self.indicies(zobrist_key);
         const tt_bucket = &self.buckets[tt_index];
 
-        var entry_location: ?*TTEntry = null;
-
-        for (&tt_bucket.entries) |*tt_entry| {
-            if (tt_entry.key_low == lower_key) {
-                if (tt_entry.depth > depth)
-                    return;
-
-                entry_location = tt_entry;
+        var entry_i: usize = 4;
+        inline for (0..4) |i| {
+            if (tt_bucket.key_low[i] == lower_key) {
+                entry_i = i;
                 break;
             }
         }
 
-        if (entry_location == null) {
-            @memmove(tt_bucket.entries[1..4], tt_bucket.entries[0..3]);
-            entry_location = &tt_bucket.entries[0];
+        if (entry_i >= 4) {
+            tt_bucket.entries[1..4].* = tt_bucket.entries[0..3].*;
+            tt_bucket.key_low[1..4].* = tt_bucket.key_low[0..3].*;
+            entry_i = 0;
+        } else {
+            if (tt_bucket.entries[entry_i].depth > depth)
+                return;
         }
 
-        entry_location.?.* = .{
+        tt_bucket.key_low[entry_i] = lower_key;
+        tt_bucket.entries[entry_i] = .{
             .move = move,
-            .key_low = lower_key,
             .score = storeScore(score, ply),
             .depth = depth,
             .bound = bound,

@@ -27,7 +27,6 @@ pub fn scoreToMateInPlyAbs(score: i16) ?u16 {
     return mate_ply;
 }
 
-
 pub fn plyToMoves(ply: u16) u16 {
     return (1 + ply) / 2;
 }
@@ -82,14 +81,59 @@ pub fn ButterflyBoard(comptime Counter: type) type {
     };
 }
 
+const PVMoves = struct {
+    pv_moves: []Move,
+    pv_len: []u16,
+
+    const Self = @This();
+
+    fn init(alloc: Alloc) !Self {
+        const pv_moves = try alloc.alloc(Move, MAX_PLY * (MAX_PLY + 1) / 2);
+        const pv_len = try alloc.alloc(u16, MAX_PLY);
+
+        return .{ .pv_moves = pv_moves, .pv_len = pv_len };
+    }
+
+    fn deinit(self: *Self, alloc: Alloc) void {
+        alloc.free(self.pv_moves);
+        alloc.free(self.pv_len);
+    }
+
+    fn clearAll(self: *Self) void {
+        @memset(self.perPlyRaw(0), Move.NULL);
+    }
+
+    fn perPlyRaw(self: *Self, ply: u32) []Move {
+        const count = MAX_PLY - ply;
+        const start = self.pv_moves.len - (count + 1) * count / 2;
+        return self.pv_moves[start..start+count];
+    }
+
+    fn perPly(self: *Self, ply: u32) []Move {
+        return self.perPlyRaw(ply)[0..self.pv_len[ply]];
+    }
+
+    fn clearPly(self: *Self, ply: u32) void {
+        self.perPlyRaw(ply)[0] = Move.NULL;
+        self.pv_len[ply] = 0;
+    }
+
+    fn setMoveAtPly(self: *Self, move: Move, ply: u32) void {
+        const pv = self.perPlyRaw(ply);
+        const next_pv = self.perPly(ply+1);
+        @memcpy(pv[1..][0..next_pv.len], next_pv);
+        pv[0] = move;
+        self.pv_len[ply] = @intCast(1 + next_pv.len);
+    }
+};
+
 pub const SearchThread = struct {
     alloc: Alloc,
     brd: *Board = undefined,
     tt: tt.TTable,
-    pv_moves: []Move,
     per_ply: *[MAX_PLY]PerPly,
     history: *History,
-
+    pv: PVMoves,
     // Stats
     nodes: u64 = 0,
     qsearch_nodes: u64 = 0,
@@ -108,15 +152,15 @@ pub const SearchThread = struct {
     const Self = @This();
 
     pub fn init(alloc: Alloc) !Self {
-        const pv_moves = try alloc.alloc(Move, MAX_PLY * (MAX_PLY + 1) / 2);
-        const per_ply = try alloc.create([MAX_PLY]PerPly);
+        const pv = try PVMoves.init(alloc);
         const history = try alloc.create(History);
+        const per_ply = try alloc.create([MAX_PLY]PerPly);
         const ttable = try tt.TTable.init(alloc);
 
         return .{
             .alloc = alloc,
             .tt = ttable,
-            .pv_moves = pv_moves,
+            .pv = pv,
             .per_ply = per_ply,
             .history = history,
             .is_exiting_search = .init(false),
@@ -125,7 +169,7 @@ pub const SearchThread = struct {
 
     pub fn deinit(self: *Self) void {
         self.tt.deinit(self.alloc);
-        self.alloc.free(self.pv_moves);
+        self.pv.deinit(self.alloc);
         self.alloc.destroy(self.per_ply);
         self.alloc.destroy(self.history);
     }
@@ -142,8 +186,7 @@ pub const SearchThread = struct {
     fn preSearchCleanup(self: *Self) void {
         self.nodes = 0;
         self.qsearch_nodes = 0;
-        @memset(self.perPlyPv(0), Move.NULL);
-        // @memset(self.pv_moves, Move.NULL);
+        self.pv.clearAll();
     }
 
     // order:
@@ -207,20 +250,24 @@ pub const SearchThread = struct {
             scores[i] = self.scoreMove(moves[i], ply, tt_move);
         }
         std.mem.sortUnstableContext(0, moves.len, Context { .bot = self, .moves = moves, .scores = scores });
+        // std.sort.insertionContext(0, moves.len, Context { .bot = self, .moves = moves, .scores = scores });
     }
 
     fn qsearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, root_beta: i16, ply: u32) i16 {
+        const in_check = self.brd.data.is_in_check;
+
         if (self.is_exiting_search.load(.unordered)) {
             return 0;
         }
+
+        self.pv.clearPly(ply);
 
         self.qsearch_nodes += 1;
 
         const is_pv_node = node_type == .Pv;
         std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
 
-        const pos_repetitions = self.brd.repetitionsCount();
-        if (pos_repetitions > 0 or self.brd.isDraw50Moves())
+        if (self.brd.isDraw50Moves() or self.brd.repetitionsCount() > 0)
             return 0;
 
         var alpha = @max(root_alpha, @as(i16, @intCast(ply)) - SCORE_MATE_ABS);
@@ -229,6 +276,8 @@ pub const SearchThread = struct {
         if (alpha >= beta) {
             return alpha;
         }
+
+        var eval = self.evalPosition();
 
         const zobrist_key = self.brd.data.zobrist_key;
         var tt_move: ?Move = null;
@@ -241,26 +290,38 @@ pub const SearchThread = struct {
             }
 
             tt_move = tt_entry.move;
-        }
 
-        const static_eval = self.evalPosition();
+            if (tt_entry.bound == .exact or 
+                tt_entry.bound == .lower and tt_entry.score >= eval or
+                tt_entry.bound == .upper and tt_entry.score <= eval) {
+                eval = tt_entry.score;
+            }
+        }
 
         // TODO make something about that?
         if (ply >= MAX_PLY)
-            return static_eval;
+            return eval;
 
-        var eval = static_eval;
 
-        if (static_eval >= beta) {
-            return static_eval;
+        if (eval >= beta) {
+            return eval;
         }
-        if (static_eval > alpha) {
-            alpha = static_eval;
+
+        eval = @max(alpha, eval);
+        
+        // TODO more accurate delta pruning
+        const delta = 1200;
+        if (eval < alpha -| delta) {
+            return alpha;
         }
+
+        if (eval > alpha) {
+            alpha = eval;
+        }
+
 
         var moves = board.Moves{};
         board.genMoves(self.brd.data, &moves);
-
     
         // if (!self.brd.data.is_in_check) {
         //     moves.filterCapturesOnly();
@@ -276,17 +337,21 @@ pub const SearchThread = struct {
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
         var tt_bound: tt.Bound = .upper;
-        var has_moves = false;
+        var moves_played: u32 = 0;
 
         for (moves.moves()) |move| {
+            // TODO lower that when SEE move ordering is implemented
+            // (for now fails SPRT)
+            // if (!in_check and moves_played >= 4)
+            //     break;
 
             if (self.brd.makeMove(move))
                 continue;
 
 
-            has_moves = true;
+            moves_played += 1;
 
-            // TODO
+            // TODO do something about draw
             // if (!move.is_capture) {
             //     // TODO
             //     self.brd.unmakeMove();
@@ -305,6 +370,7 @@ pub const SearchThread = struct {
             if (move_eval >= beta) {
                 tt_bound = .lower;
                 best_move = move;
+                self.pv.setMoveAtPly(move, ply);
                 eval = move_eval;
                 // return move_eval;
                 break;
@@ -314,6 +380,7 @@ pub const SearchThread = struct {
                 // TODO update pv?
                 eval = move_eval;
                 best_move = move;
+                self.pv.setMoveAtPly(move, ply);
                 if (eval > alpha) { 
                     alpha = eval;
                     tt_bound = .exact;
@@ -324,8 +391,8 @@ pub const SearchThread = struct {
         // No legal moves
         // TODO smarter condition
         // TODO that doesn't work becasue we skipping quiet moves in qsearch
-        if (!has_moves) {
-            if (self.brd.data.is_in_check) {
+        if (moves_played == 0) {
+            if (in_check) {
                 return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
             }
             return eval;
@@ -348,22 +415,6 @@ pub const SearchThread = struct {
         }
     }
 
-    fn perPlyPv(self: *Self, ply: u32) []Move {
-        const count = MAX_PLY - ply;
-        const start = self.pv_moves.len - (count + 1) * count / 2;
-        return self.pv_moves[start..start+count];
-    }
-
-    fn clearPvAt(self: *Self, ply: u32) void {
-        self.perPlyPv(ply)[0] = Move.NULL;
-    }
-
-    fn setNewPvMoveAtPly(self: *Self, move: Move, ply: u32) void {
-        const pv = self.perPlyPv(ply);
-        const next_pv = self.perPlyPv(ply+1);
-        @memcpy(pv[1..], next_pv);
-        pv[0] = move;
-    }
 
     fn search(
         self: *Self,
@@ -389,12 +440,7 @@ pub const SearchThread = struct {
         const is_pv_node = node_type == .Pv;
         std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
 
-        // TODO be smarter with that, do less work?
-        self.clearPvAt(ply);
-        // const count = MAX_PLY - ply;
-        // const start = self.pv_moves.len - (count + 1) * count / 2;
-        // @memset(self.pv_moves[start..], Move.NULL);
-
+        self.pv.clearPly(ply);
         self.nodes += 1;
 
         var alpha = root_alpha;
@@ -425,6 +471,13 @@ pub const SearchThread = struct {
             }
 
             tt_move = tt_entry.move;
+    
+            // TODO ..?
+            // if (tt_entry.bound == .exact or 
+            //     tt_entry.bound == .lower and tt_entry.score >= eval or
+            //     tt_entry.bound == .upper and tt_entry.score <= eval) {
+            //     eval = tt_entry.score;
+            // }
         }
 
         const static_eval = self.qsearch(node_type, alpha, beta, ply);
@@ -474,8 +527,6 @@ pub const SearchThread = struct {
         var tt_bound: tt.Bound = .upper;
 
         for (0.., moves.moves()) |i, move| {
-            std.debug.assert(self.perPlyPv(ply)[0] == best_move);
-
             if (self.brd.makeMove(move))
                 continue;
 
@@ -513,7 +564,7 @@ pub const SearchThread = struct {
                 }
                 eval = move_eval;
                 best_move = move;
-                self.setNewPvMoveAtPly(move, ply);
+                self.pv.setMoveAtPly(move, ply);
 
                 tt_bound = .lower;
                 break;
@@ -522,7 +573,7 @@ pub const SearchThread = struct {
             if (move_eval > eval) {
                 eval = move_eval;
                 best_move = move;
-                self.setNewPvMoveAtPly(move, ply);
+                self.pv.setMoveAtPly(move, ply);
 
                 if (eval > alpha) { 
                     alpha = eval;
@@ -553,7 +604,7 @@ pub const SearchThread = struct {
         }
 
         std.debug.assert(ply != 0 or best_move != Move.NULL);
-        std.debug.assert(self.perPlyPv(ply)[0] == best_move);
+        std.debug.assert(self.pv.perPly(ply)[0] == best_move);
 
         // prevent storing to tt 
         if (ply > 0 and self.is_exiting_search.load(.unordered)) {
@@ -610,7 +661,7 @@ pub const SearchThread = struct {
                     .time_ms = iteration_time / std.time.ns_per_ms,
                     .nodes = self.nodes,
                     .nps =  @as(u64, @intCast(@as(u96, self.nodes) * std.time.ns_per_s / @max(iteration_time, 1))),
-                    .pv = trimInvalidPvMoves(self.perPlyPv(0)),
+                    .pv = self.pv.perPly(0),
                     .score = score,
                 };
 
@@ -621,7 +672,7 @@ pub const SearchThread = struct {
 
             // for now don't trust unfinished iterations if ply > 0
             if (!is_exiting or d == 1) {
-                best_move = self.perPlyPv(0)[0];
+                best_move = self.pv.perPly(0)[0];
                 std.debug.assert(best_move != Move.NULL);
             }
 

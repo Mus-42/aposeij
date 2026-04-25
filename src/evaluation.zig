@@ -80,18 +80,14 @@ const BONUS_TABLES: [6][64]i8 = .{
 };
 
 pub fn captureMoveMaterial(bd: Board.BoardData, move: Move) i16 {
-    var material: i16 = 0;
     const from = @intFromEnum(bd.getPieceAt(move.from).?);
     const to_square = if (!move.is_promotion and move.extra.capture == .ep_capture) move.to ^ 8 else move.to;
     const to = @intFromEnum(bd.getPieceAt(to_square).?);
 
     const cost_from = if (from < 6) PIECE_COST[from] else PIECE_COST[from - 6];
     const cost_to = if (to < 6) PIECE_COST[to] else PIECE_COST[to - 6];
-
-    material -= cost_from;
-    material += cost_to;
-
-    return material;
+    
+    return cost_to * 4 - cost_from;
 }
 
 pub fn whiteEval(bd: Board.BoardData) i16 {
