@@ -78,6 +78,14 @@ pub fn ButterflyBoard(comptime Counter: type) type {
             const i = index(color, move);
             self.counters[i] +|= count;
         }
+
+        // TODO this doesn't gain, ivestigate why
+        pub fn updateHistoryGravity(self: *Self, color: board.SideToMove, move: Move, raw_bonus: i32) void {
+            const i = index(color, move);
+            const MAX_BONUS = 32000;
+            const bonus = @max(@min(raw_bonus, MAX_BONUS), -MAX_BONUS);
+            self.counters[i] +|= @intCast(bonus - @divTrunc(@as(i32, self.counters[i]) * @as(i32, @intCast(@abs(bonus))), MAX_BONUS));
+        }
     };
 }
 
@@ -323,7 +331,7 @@ pub const SearchThread = struct {
         var moves = board.Moves{};
         board.genMoves(self.brd.data, &moves);
     
-        // if (!self.brd.data.is_in_check) {
+        // if (!in_check) {
         //     moves.filterCapturesOnly();
         // }
         moves.filterCapturesOnly();
@@ -437,6 +445,7 @@ pub const SearchThread = struct {
             }
         }
 
+        const in_check = self.brd.data.is_in_check;
         const is_pv_node = node_type == .Pv;
         std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
 
@@ -454,8 +463,7 @@ pub const SearchThread = struct {
             }
         }
 
-        const pos_repetitions = self.brd.repetitionsCount();
-        if ((pos_repetitions > 0 or self.brd.isDraw50Moves()) and ply > 0)
+        if (ply > 0 and (self.brd.isDraw50Moves() or self.brd.repetitionsCount() > 0))
             return 0;
 
         const zobrist_key = self.brd.data.zobrist_key;
@@ -465,7 +473,7 @@ pub const SearchThread = struct {
             if (!is_pv_node and tt_entry.depth >= remaining_depth and ply > 0) { 
                 if (tt_entry.bound == .exact or 
                     tt_entry.bound == .lower and tt_entry.score >= beta or
-                    tt_entry.bound == .upper and tt_entry.score <= root_alpha) {
+                    tt_entry.bound == .upper and tt_entry.score <= alpha) {
                     return tt_entry.score;
                 }
             }
@@ -492,7 +500,7 @@ pub const SearchThread = struct {
 
         var eval: i16 = -SCORE_INFINITY;
 
-        if (!is_pv_node and !self.brd.data.is_in_check and @abs(alpha) < 2000) {
+        if (!is_pv_node and !in_check and @abs(alpha) < 2000) {
             const margin = @as(i16, @intCast(150 * remaining_depth));
             if (static_eval >= beta + margin ) {
                 return static_eval;
@@ -512,7 +520,7 @@ pub const SearchThread = struct {
         const moves_len = moves.count();
 
         if (moves_len == 0) {
-            if (self.brd.data.is_in_check) {
+            if (in_check) {
                 return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
             }
             return 0;
@@ -526,12 +534,18 @@ pub const SearchThread = struct {
         var best_move: Move = Move.NULL;
         var tt_bound: tt.Bound = .upper;
 
-        for (0.., moves.moves()) |i, move| {
+        var legal_moves: u32 = 0;
+
+        for (moves.moves(), scores) |move, score| {
             if (self.brd.makeMove(move))
                 continue;
 
+            const new_in_check = self.brd.data.is_in_check;
+
+            _ = score;
+            legal_moves += 1;
             var search_ext: u32 = 0;
-            if (self.brd.data.is_in_check) {
+            if (new_in_check) {
                 search_ext += 1;
             }
             if (move.is_promotion and move.extra.promotion == .queen) {
@@ -541,14 +555,26 @@ pub const SearchThread = struct {
                 search_ext += 1;
             }
             search_ext = @min(search_ext + extensions_used, MAX_EXTENSIONS) - extensions_used;
-            
+ 
+            // TODO lmr
+            var reduction: u32 = 0;
+            // if (legal_moves > 4 and remaining_depth > 1 and !in_check and score < MOVESCORE_KILLER) {
+            //     reduction = ???;
+            //     reduction -|= @intFromBool(is_pv_node);
+            // }
+            _ = &reduction;
+
+            // TODO 
+
+            // pvs
             var move_eval: i16 = -SCORE_INFINITY;
-            if (remaining_depth < 2 or i < 3) {
+            if (remaining_depth < 2 or legal_moves < 3) {
                 move_eval = -self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext);
             } else {
-                move_eval = -self.search(.NonPv, -(alpha+1), -alpha, remaining_depth - 1, ply + 1, extensions_used + search_ext);
-                if (move_eval > alpha and is_pv_node) {
-                    move_eval = -self.search(.Pv, -beta, -alpha, remaining_depth - 1, ply + 1, extensions_used);
+                // TODO remove extensions from this those 2
+                move_eval = -self.search(.NonPv, -(alpha+1), -alpha, remaining_depth - 1 - reduction + search_ext, ply + 1, extensions_used + search_ext);
+                if (move_eval > alpha and (is_pv_node or reduction > 0)) {
+                    move_eval = -self.search(.Pv, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext);
                 }
             }
 
@@ -582,17 +608,15 @@ pub const SearchThread = struct {
             }
         }
 
-        // Should be the same condition
-        // Reachable if and only if has 0 legal moves
-        if (eval == -SCORE_INFINITY or best_move == Move.NULL) {
+        if (legal_moves == 0) {
             std.debug.assert(ply > 0);
-            if (self.brd.data.is_in_check) {
+            if (in_check) {
                 return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
             }
             return 0;
         }
 
-        if (best_move != Move.NULL and !best_move.is_capture) {
+        if (best_move != Move.NULL and !best_move.is_capture and tt_bound == .lower) {
             const color = self.brd.data.side_to_move;
             const bonus: i16 = @intCast(remaining_depth * remaining_depth);
             self.history.add(color, best_move, bonus);
