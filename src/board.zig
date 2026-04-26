@@ -268,6 +268,38 @@ pub const Board = struct {
         self.data = other.data;
     }
 
+    pub fn makeNullMove(self: *Self) bool {
+        self.history.appendAssumeCapacity(.{ .data = self.data, .move = Move.NULL });
+
+        self.data.en_passant_target = null;
+
+        // TODO pointless???
+        const is_opponent_king_in_check = self.data.computeIsInCheck();
+        // illegal move
+        if (is_opponent_king_in_check) {
+            self.unmakeMove();
+            return true;
+        }
+
+        if (self.data.side_to_move == .black) {
+            self.data.halfmoves50 += 1;
+        }
+
+        self.data.side_to_move.flip();
+        self.data.is_in_check = self.data.computeIsInCheck();
+        // TODO don't compute from scratch each single time
+        self.data.recomputeZobristKey();
+        // self.data.castling_rights.updateAfterMove(move);
+
+        return false;
+    }
+
+    pub fn unmakeNullMove(self: *Self) void {
+        // TODO: safety checks?
+        self.unmakeMove();
+    }
+
+
     pub fn makeMove(self: *Self, move: Move) bool {
         self.history.appendAssumeCapacity(.{ .data = self.data, .move = move });
         

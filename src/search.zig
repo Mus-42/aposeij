@@ -432,6 +432,7 @@ pub const SearchThread = struct {
         remaining_depth: u32,
         ply: u32,
         extensions_used: u32,
+        allow_null: bool,
     ) i16 {
         if (ply > 0 and self.is_exiting_search.load(.unordered)) {
             return 0;
@@ -494,25 +495,46 @@ pub const SearchThread = struct {
             return 0;
         }
 
+        if (remaining_depth == 0) {
+            return static_eval;
+        }
+
         // TODO make something about that?
         if (ply >= MAX_PLY)
             return static_eval;
 
         var eval: i16 = -SCORE_INFINITY;
 
-        if (!is_pv_node and !in_check and @abs(alpha) < 2000) {
-            const margin = @as(i16, @intCast(150 * remaining_depth));
-            if (static_eval >= beta + margin ) {
-                return static_eval;
+        if (!is_pv_node and !in_check) {
+            // RFP
+            if (@abs(alpha) < 2000) {
+                const margin = @as(i16, @intCast(150 * remaining_depth));
+                if (static_eval >= beta + margin ) {
+                    return static_eval;
+                }
+                if (static_eval - margin > alpha) {
+                    alpha = static_eval - margin;
+                }
             }
-            if (static_eval - margin > alpha) {
-                alpha = static_eval - margin;
+
+            // NMP
+            if (allow_null and @abs(beta) < SCORE_MATE_ABS and remaining_depth > 1 and ply > 0) {
+                if (!self.brd.makeNullMove()) {
+                    const depth_reduction = @min(1 + remaining_depth/2, 4);
+                    const nm_score = -self.search(.NonPv, -beta, -beta + 1, remaining_depth - depth_reduction, ply+1, extensions_used, false);
+                    self.brd.unmakeNullMove();
+                    if (nm_score >= beta) {
+                        return nm_score;
+                        // TODO more conditions on NMP / double -> enable verification
+                        // const nm_score_verif = self.search(.NonPv, beta - 1, beta, remaining_depth - depth_reduction, ply, extensions_used, false);
+                        // if (nm_score_verif >= beta) {
+                        //     return nm_score;
+                        // }
+                    }
+                }
             }
         }
 
-        if (remaining_depth == 0) {
-            return static_eval;
-        }
 
         var moves = board.Moves{};
         board.genMoves(self.brd.data, &moves);
@@ -569,12 +591,12 @@ pub const SearchThread = struct {
             // pvs
             var move_eval: i16 = -SCORE_INFINITY;
             if (remaining_depth < 2 or legal_moves < 3) {
-                move_eval = -self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext);
+                move_eval = -self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext, false);
             } else {
                 // TODO remove extensions from this those 2
-                move_eval = -self.search(.NonPv, -(alpha+1), -alpha, remaining_depth - 1 - reduction + search_ext, ply + 1, extensions_used + search_ext);
+                move_eval = -self.search(.NonPv, -(alpha+1), -alpha, remaining_depth - 1 - reduction + search_ext, ply + 1, extensions_used + search_ext, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
-                    move_eval = -self.search(.Pv, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext);
+                    move_eval = -self.search(.Pv, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext, false);
                 }
             }
 
@@ -673,7 +695,7 @@ pub const SearchThread = struct {
             self.preSearchCleanup();
 
             const search_iteration_beg = std.time.Instant.now() catch unreachable;
-            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0);
+            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             const search_iteration_end = std.time.Instant.now() catch unreachable;
             const iteration_time = search_iteration_end.since(search_iteration_beg);
 
@@ -726,7 +748,7 @@ pub const SearchThread = struct {
 
             self.preSearchCleanup();
 
-            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0);
+            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             const is_canceled = self.is_exiting_search.load(.unordered);
             
             if (is_canceled) {
