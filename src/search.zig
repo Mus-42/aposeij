@@ -21,6 +21,20 @@ pub const SCORE_INFINITY = SCORE_MATE_ABS+1;
 
 pub const TIME_EPS_NS: u64 = 200;
 
+
+// order:
+// hash
+// pv
+// captures (good)
+// killers
+// quiet
+// captured (bad)
+pub const MOVESCORE_TT = 0x7FFF;
+pub const MOVESCORE_GOOD_CAPTURE = 0x5000;
+pub const MOVESCORE_PROMOTION = 0x5100;
+pub const MOVESCORE_KILLER = 0x5000;
+pub const MOVESCORE_BAD_CAPTURE = -0x4000;
+
 pub fn scoreToMateInPlyAbs(score: i16) ?u16 {
     const mate_ply = SCORE_MATE_ABS - @abs(score);
     if (mate_ply > SCORE_MATE_EPS) return null;
@@ -49,6 +63,27 @@ pub const TimeControls = union (enum) {
     to_depth: struct { target: u32 },
 };
 
+pub fn wipEstimateGamePhase(bd: board.Board.BoardData) i16 {
+    const VALUES: [5]i16 = .{ 10, 90, 100, 120, 200 };
+
+    var score: i16 = 0;
+    inline for (0..5) |i| {
+        score += VALUES[i] * (@popCount(bd.pieces[i]) + @popCount(bd.pieces[i + 6]));
+    }
+
+    if (score < 900) {
+        return 4000;
+    } else if (score < 1250) {
+        return 3000;
+    } else if (score < 1450) {
+        return 2000;
+    } else if (score < 1600) {
+        return 1000;
+    }
+
+    return 0;
+}
+
 pub fn ButterflyBoard(comptime Counter: type) type {
     return struct {
         // TODO somehow avoid wasting most of the memory on impossible moves
@@ -57,7 +92,7 @@ pub fn ButterflyBoard(comptime Counter: type) type {
         const Self = @This();
 
         pub fn index(color: board.SideToMove, move: Move) usize {
-            return @as(usize, @intFromEnum(color)) << 12 | @as(usize, move.from) << 6 | @as(usize, move.to) << 6;
+            return @as(usize, @intFromEnum(color)) << 12 | @as(usize, move.from) << 6 | @as(usize, move.to);
         }
 
         pub fn setToZero(self: *Self) void {
@@ -79,10 +114,9 @@ pub fn ButterflyBoard(comptime Counter: type) type {
             self.counters[i] +|= count;
         }
 
-        // TODO this doesn't gain, ivestigate why
         pub fn updateHistoryGravity(self: *Self, color: board.SideToMove, move: Move, raw_bonus: i32) void {
             const i = index(color, move);
-            const MAX_BONUS = 32000;
+            const MAX_BONUS = MOVESCORE_KILLER;
             const bonus = @max(@min(raw_bonus, MAX_BONUS), -MAX_BONUS);
             self.counters[i] +|= @intCast(bonus - @divTrunc(@as(i32, self.counters[i]) * @as(i32, @intCast(@abs(bonus))), MAX_BONUS));
         }
@@ -197,18 +231,6 @@ pub const SearchThread = struct {
         self.pv.clearAll();
     }
 
-    // order:
-    // hash
-    // pv
-    // captures (good)
-    // killers
-    // quiet
-    // captured (bad)
-    const MOVESCORE_TT = 0x7FFF;
-    const MOVESCORE_GOOD_CAPTURE = 0x5000;
-    const MOVESCORE_PROMOTION = 0x5000;
-    const MOVESCORE_KILLER = 0x5000;
-    const MOVESCORE_BAD_CAPTURE = -0x4000;
 
     fn scoreMove(self: *Self, move: Move, ply: u32, tt_move: ?Move) i16 {
         if (tt_move == move) {
@@ -641,11 +663,11 @@ pub const SearchThread = struct {
         if (best_move != Move.NULL and !best_move.is_capture and tt_bound == .lower) {
             const color = self.brd.data.side_to_move;
             const bonus: i16 = @intCast(remaining_depth * remaining_depth);
-            self.history.add(color, best_move, bonus);
+            self.history.updateHistoryGravity(color, best_move, bonus);
             for (moves.moves()) |move| {
                 if (move.is_capture) continue;
                 if (move == best_move) break;
-                self.history.add(color, move, -bonus);
+                self.history.updateHistoryGravity(color, move, -bonus);
             }
         }
 
