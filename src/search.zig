@@ -586,7 +586,6 @@ pub const SearchThread = struct {
 
             const new_in_check = self.brd.data.is_in_check;
 
-            _ = score;
             legal_moves += 1;
             var search_ext: u32 = 0;
             if (new_in_check) {
@@ -600,17 +599,18 @@ pub const SearchThread = struct {
             }
             search_ext = @min(search_ext + extensions_used, MAX_EXTENSIONS) - extensions_used;
  
-            // TODO lmr
+            // TODO fix move ordering and implement actual LMR
             var reduction: u32 = 0;
-            // if (legal_moves > 4 and remaining_depth > 1 and !in_check and score < MOVESCORE_KILLER) {
-            //     reduction = ???;
-            //     reduction -|= @intFromBool(is_pv_node);
-            // }
-            _ = &reduction;
+            if (legal_moves > 4 and remaining_depth > 1 and !in_check and score < 0) {
+                reduction = 1;
+                // score < MOVESCORE_KILLER
+                // reduction = ???;
+                // reduction -|= @intFromBool(is_pv_node);
+            }
 
-            // TODO 
+            // TODO figure out this crap, it fails SPRT on itself
 
-            // pvs
+            // PVS
             var move_eval: i16 = -SCORE_INFINITY;
             if (remaining_depth < 2 or legal_moves < 3) {
                 move_eval = -self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext, false);
