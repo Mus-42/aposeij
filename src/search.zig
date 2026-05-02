@@ -3,6 +3,7 @@ const board = @import("board");
 const tt = @import("transposition_table.zig");
 const evaluation = @import("evaluation.zig");
 const uci = @import("uci.zig");
+const hist = @import("history.zig");
 
 const Alloc = std.mem.Allocator;
 const Move = board.Move;
@@ -84,45 +85,6 @@ pub fn wipEstimateGamePhase(bd: board.Board.BoardData) i16 {
     return 0;
 }
 
-pub fn ButterflyBoard(comptime Counter: type) type {
-    return struct {
-        // TODO somehow avoid wasting most of the memory on impossible moves
-        counters: [2 * 64 * 64]Counter,
-
-        const Self = @This();
-
-        pub fn index(color: board.SideToMove, move: Move) usize {
-            return @as(usize, @intFromEnum(color)) << 12 | @as(usize, move.from) << 6 | @as(usize, move.to);
-        }
-
-        pub fn setToZero(self: *Self) void {
-            @memset(&self.counters, 0);
-        }
-
-        pub fn get(self: *const Self, color: board.SideToMove, move: Move) Counter {
-            const i = index(color, move);
-            return self.counters[i];
-        }
-
-        pub fn set(self: *Self, color: board.SideToMove, move: Move, count: Counter) void {
-            const i = index(color, move);
-            self.counters[i] = count;
-        }
-
-        pub fn add(self: *Self, color: board.SideToMove, move: Move, count: Counter) void {
-            const i = index(color, move);
-            self.counters[i] +|= count;
-        }
-
-        pub fn updateHistoryGravity(self: *Self, color: board.SideToMove, move: Move, raw_bonus: i32) void {
-            const i = index(color, move);
-            const MAX_BONUS = MOVESCORE_KILLER;
-            const bonus = @max(@min(raw_bonus, MAX_BONUS), -MAX_BONUS);
-            self.counters[i] +|= @intCast(bonus - @divTrunc(@as(i32, self.counters[i]) * @as(i32, @intCast(@abs(bonus))), MAX_BONUS));
-        }
-    };
-}
-
 const PVMoves = struct {
     pv_moves: []Move,
     pv_len: []u16,
@@ -174,7 +136,7 @@ pub const SearchThread = struct {
     brd: *Board = undefined,
     tt: tt.TTable,
     per_ply: *[MAX_PLY]PerPly,
-    history: *History,
+    history: *hist.History,
     pv: PVMoves,
     // Stats
     nodes: u64 = 0,
@@ -185,8 +147,6 @@ pub const SearchThread = struct {
     available_time: u64 = 0,
     is_exiting_search: std.atomic.Value(bool),
 
-    const History = ButterflyBoard(i16);
-
     const PerPly = struct {
         killers: [2]Move,
     };
@@ -195,7 +155,7 @@ pub const SearchThread = struct {
 
     pub fn init(alloc: Alloc) !Self {
         const pv = try PVMoves.init(alloc);
-        const history = try alloc.create(History);
+        const history = try alloc.create(hist.History);
         const per_ply = try alloc.create([MAX_PLY]PerPly);
         const ttable = try tt.TTable.init(alloc);
 
@@ -256,7 +216,7 @@ pub const SearchThread = struct {
             return MOVESCORE_BAD_CAPTURE + material;
         }
 
-        const move_history = self.history.get(self.brd.data.side_to_move, move);
+        const move_history = self.history.getQuiet(self.brd.data.side_to_move, move);
         return @min(@max(move_history, MOVESCORE_BAD_CAPTURE), MOVESCORE_KILLER);
     }
 
@@ -663,11 +623,11 @@ pub const SearchThread = struct {
         if (best_move != Move.NULL and !best_move.is_capture and tt_bound == .lower) {
             const color = self.brd.data.side_to_move;
             const bonus: i16 = @intCast(remaining_depth * remaining_depth);
-            self.history.updateHistoryGravity(color, best_move, bonus);
+            self.history.updateQuiet(color, best_move, bonus);
             for (moves.moves()) |move| {
                 if (move.is_capture) continue;
                 if (move == best_move) break;
-                self.history.updateHistoryGravity(color, move, -bonus);
+                self.history.updateQuiet(color, move, -bonus);
             }
         }
 
@@ -706,7 +666,7 @@ pub const SearchThread = struct {
         self.available_time = available_time;
         self.search_start = std.time.Instant.now() catch unreachable;
         
-        self.history.setToZero();
+        self.history.reset();
 
         var best_move: Move = .NULL;
 
@@ -759,7 +719,7 @@ pub const SearchThread = struct {
         self.available_time = time_limit_ns;
         self.search_start = std.time.Instant.now() catch unreachable;
         
-        self.history.setToZero();
+        self.history.reset();
 
         var depth_limit: u32 = MAX_PLY;
         var found_at: u16 = MAX_PLY;
