@@ -170,9 +170,8 @@ fn perft_root(brd: *board.Board, remaining_depth: u32, output: *std.Io.Writer) !
         return 1;
     }
 
-    var moves = board.Moves{};
-
-    board.genMoves(brd.data, &moves);
+    var moves = board.MoveList{};
+    brd.movegen.genMoves(&brd.data, &moves);
     const impl = struct {
         fn lessThan(_: void, a: board.Move, b: board.Move) bool {
             return std.mem.lessThan(u8, &a.algebraicNotation().buf, &b.algebraicNotation().buf);
@@ -199,8 +198,8 @@ fn perft(brd: *board.Board, remaining_depth: u32) u64 {
         return 1;
     }
 
-    var moves = board.Moves{};
-    board.genMoves(brd.data, &moves);
+    var moves = board.MoveList{};
+    brd.movegen.genMoves(&brd.data, &moves);
 
     var nodes_count = @as(u64, 0);
     for (moves.moves()) |move| {

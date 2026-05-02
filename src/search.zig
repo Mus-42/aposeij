@@ -310,8 +310,8 @@ pub const SearchThread = struct {
         }
 
 
-        var moves = board.Moves{};
-        board.genMoves(self.brd.data, &moves);
+        var moves = board.MoveList{};
+        self.brd.movegen.genMoves(&self.brd.data, &moves);
     
         // if (!in_check) {
         //     moves.filterCapturesOnly();
@@ -518,8 +518,8 @@ pub const SearchThread = struct {
         }
 
 
-        var moves = board.Moves{};
-        board.genMoves(self.brd.data, &moves);
+        var moves = board.MoveList{};
+        self.brd.movegen.genMoves(&self.brd.data, &moves);
 
         const moves_len = moves.count();
 
