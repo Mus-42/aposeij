@@ -238,7 +238,6 @@ fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: 
     var search_thread = try search.SearchThread.init(alloc);
     defer search_thread.deinit();
 
-
     const movegen = try board.Movegen.init(alloc);
     defer alloc.destroy(movegen);
 
@@ -293,6 +292,7 @@ fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: 
         } else if (std.mem.eql(u8, name, "test_perft")) {
             const fen = board.writeFen(&fen_buf, bd);
             var is_passed = true;
+            brd.setBoardData(bd);
             while (command_parts.next()) |perft_test| {
                 var test_parts = std.mem.splitScalar(u8, perft_test, ':');
                 const depth_str = test_parts.next() orelse continue;

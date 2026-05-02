@@ -158,8 +158,8 @@ const MovegenComptimeLoopups = struct {
     rook_magic: [64]u64,
     bishop_shift: [64]u6,
     rook_shift: [64]u6,
-    bishop_index: [64]usize,
-    rook_index: [64]usize,
+    bishop_index: [65]usize,
+    rook_index: [65]usize,
     // precomputed moves
     knight_moves: [64]u64,
     king_moves: [64]u64,
@@ -168,15 +168,295 @@ const MovegenComptimeLoopups = struct {
 const LOOKUPS: MovegenComptimeLoopups = blk: {
     @setEvalBranchQuota(50000);
 
-    var magic: MovegenComptimeLoopups = .{
+    var lookups: MovegenComptimeLoopups = .{
         .bishop_blockers_mask = undefined,
         .rook_blockers_mask = undefined,
-        .rook_magic = undefined,
-        .bishop_magic = undefined,
-        .rook_shift = undefined,
-        .bishop_shift = undefined,
-        .rook_index = undefined,
-        .bishop_index = undefined,
+        .rook_magic = .{
+            0x84800040018ad0e1,
+            0x20400040200d1002,
+            0x530008c020021101,
+            0x0080080006100080,
+            0x4600020010a0b804,
+            0x2e00080a002c3011,
+            0x04000128101a0094,
+            0x2200004108208214,
+            0x0401800a40008720,
+            0x9380400850016004,
+            0x02c1002000411900,
+            0x400e000c1200a040,
+            0x9062000856009060,
+            0x0002003084180600,
+            0x0224002802300403,
+            0x8054800100115880,
+            0x0820728004400481,
+            0x104582004a010020,
+            0x0129010010402000,
+            0x510021001000a903,
+            0x8080808004002800,
+            0x9001280104604030,
+            0x0296cc0050590208,
+            0x884002002882c401,
+            0x1425044300208000,
+            0x979008c240002002,
+            0x00b0720600208040,
+            0x045418a100100102,
+            0x5212002200083024,
+            0x5070740801104020,
+            0x440c092400322810,
+            0x10ab000100018142,
+            0x03c003864a8000e0,
+            0x2420012082804002,
+            0x2a0100a005003040,
+            0x2223100105002008,
+            0x8899800800800403,
+            0x116a00104a000854,
+            0x4218810a44000810,
+            0x086308804a000104,
+            0x01c661c012818000,
+            0x2180c5e010094000,
+            0x0109328200220041,
+            0x8102883001030021,
+            0xc590110008010004,
+            0x0081002c000f0008,
+            0x8410026108040010,
+            0x406a0900c1920004,
+            0x800380530a002200,
+            0x4032862203005200,
+            0xa258b04100600500,
+            0xc9d0048048011080,
+            0x46740c0801310100,
+            0xc4c8800200040180,
+            0x2a42380a0b902400,
+            0x32480d029402c200,
+            0x8b30338202614102,
+            0x5a08514000842101,
+            0xadc3015040382005,
+            0x0700260140288a06,
+            0x281e001088c42002,
+            0x113100080204000f,
+            0x0806080922300284,
+            0x800b010241aa8c02,
+        },
+        .bishop_magic = .{
+            0xe09425b0152a2d20,
+            0x801901c189884a01,
+            0x06d010a65f1ac440,
+            0x408c0c0082080000,
+            0x2104042021203460,
+            0x5800a255ac00d030,
+            0x9182a4c443088021,
+            0x111edc0230a20801,
+            0x8c05261102220062,
+            0x02881c0121093ca8,
+            0x020a5010923d3404,
+            0x00af880489140581,
+            0x60c40410281447a8,
+            0x800d020192a36080,
+            0x8068c861860b3028,
+            0x8580243b83028600,
+            0x0120104c82712879,
+            0x4810011544c74400,
+            0x1a30112a48820240,
+            0x7018c414040080d1,
+            0x40b2014c00a20908,
+            0x0282800808900808,
+            0x5e04084090a50984,
+            0x829a024431a14303,
+            0x408220a140083200,
+            0x904820204d825181,
+            0x540501047015c200,
+            0x452006002d401040,
+            0x0084840008802008,
+            0x2c48008000700406,
+            0x64240404e0464608,
+            0x902c0104c1d0a180,
+            0x1049918501408801,
+            0x0001901088e80648,
+            0x9024046404021400,
+            0x0a938a0082680080,
+            0x0808132400044100,
+            0x4190020460020196,
+            0x290d880a07050109,
+            0x4938144090444a00,
+            0x800a94c48508c060,
+            0x2890c15683192001,
+            0x4022010048000109,
+            0x61041b2058024300,
+            0x8788a02009007584,
+            0xa435105002809040,
+            0x20a1b180a3002204,
+            0x89f07890a2588300,
+            0x90028284c2894400,
+            0x870449818c039003,
+            0x06710d6b09699104,
+            0x90a00a04c20a04c8,
+            0xc4204211a2020004,
+            0x4280a7141d60a6a4,
+            0x108a8c0c01806901,
+            0x10c3040102e5120a,
+            0x3503009802c144a0,
+            0x88001438820892ca,
+            0x880500651a40d082,
+            0x9058100408208848,
+            0x00924000a02d2408,
+            0x2940084724440ee0,
+            0x414007c802040ae0,
+            0x0506b70901029a00,
+        },
+        .rook_shift = .{
+            12, 11, 11, 11, 11, 11, 11, 12,
+            11, 10, 10, 10, 10, 10, 10, 11,
+            11, 10, 10, 10, 10, 10, 10, 11,
+            11, 10, 10, 10, 10, 10, 10, 11,
+            11, 10, 10, 10, 10, 10, 10, 11,
+            11, 10, 10, 10, 10, 10, 10, 11,
+            11, 10, 10, 10, 10, 10, 10, 11,
+            12, 11, 11, 11, 11, 11, 11, 12,
+        },
+        .bishop_shift = .{
+            6, 5, 5, 5, 5, 5, 5, 6,
+            5, 5, 5, 5, 5, 5, 5, 5,
+            5, 5, 7, 7, 7, 7, 5, 5,
+            5, 5, 7, 9, 9, 7, 5, 5,
+            5, 5, 7, 9, 9, 7, 5, 5,
+            5, 5, 7, 7, 7, 7, 5, 5,
+            5, 5, 5, 5, 5, 5, 5, 5,
+            6, 5, 5, 5, 5, 5, 5, 6,
+        },
+        .rook_index = .{
+            0,
+            4096,
+            6144,
+            8192,
+            10240,
+            12288,
+            14336,
+            16384,
+            20480,
+            22528,
+            23552,
+            24576,
+            25600,
+            26624,
+            27648,
+            28672,
+            30720,
+            32768,
+            33792,
+            34816,
+            35840,
+            36864,
+            37888,
+            38912,
+            40960,
+            43008,
+            44032,
+            45056,
+            46080,
+            47104,
+            48128,
+            49152,
+            51200,
+            53248,
+            54272,
+            55296,
+            56320,
+            57344,
+            58368,
+            59392,
+            61440,
+            63488,
+            64512,
+            65536,
+            66560,
+            67584,
+            68608,
+            69632,
+            71680,
+            73728,
+            74752,
+            75776,
+            76800,
+            77824,
+            78848,
+            79872,
+            81920,
+            86016,
+            88064,
+            90112,
+            92159,
+            94207,
+            96255,
+            98303,
+            102399,
+        },
+        .bishop_index = .{
+            0,
+            63,
+            89,
+            120,
+            152,
+            184,
+            215,
+            244,
+            306,
+            332,
+            360,
+            391,
+            423,
+            455,
+            486,
+            515,
+            543,
+            574,
+            606,
+            734,
+            862,
+            990,
+            1118,
+            1148,
+            1178,
+            1210,
+            1241,
+            1369,
+            1881,
+            2393,
+            2521,
+            2553,
+            2584,
+            2615,
+            2647,
+            2775,
+            3287,
+            3799,
+            3927,
+            3959,
+            3991,
+            4021,
+            4051,
+            4179,
+            4307,
+            4435,
+            4563,
+            4594,
+            4625,
+            4649,
+            4675,
+            4706,
+            4738,
+            4770,
+            4801,
+            4827,
+            4855,
+            4917,
+            4943,
+            4974,
+            5006,
+            5038,
+            5069,
+            5097,
+            5160,
+        },
         .knight_moves = undefined,
         .king_moves = undefined,
     };
@@ -188,31 +468,130 @@ const LOOKUPS: MovegenComptimeLoopups = blk: {
         const pos: Square = @intCast(i);
         const rank: u3 = @intCast(pos >> 3);
         const file: u3 = @intCast(pos & 7);
-        magic.knight_moves[i] = knightAttacksSlow(pos);
-        magic.king_moves[i] = kingAttacksSlow(pos);
+        lookups.knight_moves[i] = knightAttacksSlow(pos);
+        lookups.king_moves[i] = kingAttacksSlow(pos);
         const exclude_pos = ~(@as(u64, 1) << pos);
-        magic.bishop_blockers_mask[i] = bishopAttacksSlow(pos, 0) & exclude_ranks & exclude_files & exclude_pos;
-        magic.rook_blockers_mask[i] = ((rankMask(rank) & exclude_files) | (fileMask(file) & exclude_ranks)) & exclude_pos;
+        lookups.bishop_blockers_mask[i] = bishopAttacksSlow(pos, 0) & exclude_ranks & exclude_files & exclude_pos;
+        lookups.rook_blockers_mask[i] = ((rankMask(rank) & exclude_files) | (fileMask(file) & exclude_ranks)) & exclude_pos;
     }
     
-    break :blk magic;
+    break :blk lookups;
 };
 
 fn blockersBoardN(blockers: u64, index: u64) u64 {
     var res: u64 = 0;
     var block = blockers;
+    var i = index;
     while (block != 0) {
-        res |= (index & 1) << @ctz(block);
-        index >>= 1;
+        res |= (i & 1) << @intCast(@ctz(block));
+        i >>= 1;
         block &= block - 1;
     }
     return res;
+}
+
+// TODO clean up this a bit
+pub fn searchBitboardMagic(alloc: Alloc, is_rook: bool) !void {
+    const blockers: []u64 = try alloc.alloc(u64, 1<<12);
+    defer alloc.free(blockers);
+
+    const attacks: []u64 = try alloc.alloc(u64, 1<<12);
+    defer alloc.free(attacks);
+
+    const occupied: []u64 = try alloc.alloc(u64, 1<<14);
+    defer alloc.free(occupied);
+
+    const MAX_ITERATIONS = 1<<24;
+
+    var out_magic: [64]u64 = @splat(0);
+    var out_size: [64]u16 = @splat(0);
+    var out_bits: [64]u16 = @splat(0);
+
+    var rng: std.Random.DefaultPrng = .init(42);
+    var total: usize = 0;
+    for (0..64) |i| {
+        const pos: Square = @intCast(i);
+
+        const blockers_mask = if (is_rook) LOOKUPS.rook_blockers_mask[i] else LOOKUPS.bishop_blockers_mask[i];
+        const key_bits: u5 = @intCast(@popCount(blockers_mask));
+        for (0..@as(u32, 1)<<key_bits) |j| {
+            blockers[j] = blockersBoardN(blockers_mask, j);
+            if (is_rook) {
+                attacks[j] = rookAttacksSlow(pos, blockers[j]);
+            } else {
+                attacks[j] = bishopAttacksSlow(pos, blockers[j]);
+            }
+        }
+
+        var best_magic: u64 = 0;
+        var best_size: usize = occupied.len;
+        var best_bits: usize = key_bits + 2;
+        const min_bits = key_bits;//@max(1, key_bits-|1);
+        
+        for (0..MAX_ITERATIONS) |_| {
+            // ~25% bits set
+            const magic = rng.next() & rng.next();
+            
+            bits_loop: for (min_bits..best_bits+1) |bits| {
+                const shift: u6 = @intCast(64 - bits);
+
+                @memset(occupied[0..@as(u32, 1)<<@intCast(bits)], 0);
+                for (0..@as(u32, 1)<<key_bits) |j| {
+                    const index = (blockers[j] *% magic) >> shift;
+                    if (occupied[index] != 0 and occupied[index] != attacks[j]) {
+                        continue :bits_loop;
+                    }
+                    occupied[index] = attacks[j];
+                }
+                var size = @as(usize, 1)<<@intCast(bits);
+                while (occupied[size - 1] == 0) {
+                    size -= 1;
+                }
+
+                if (best_size > size) {
+                    best_size = size;
+                    best_magic = magic;
+                    best_bits = bits;
+                    break;
+                }
+            }
+        }
+
+        // std.debug.print("magic: 0x{x:016} size: {} ({} bits) ({} key)\n", .{best_magic, best_size, best_bits, key_bits});
+        // std.debug.assert(best_size < occupied.len);
+        total += best_size;
+        out_magic[i] = best_magic;
+        out_bits[i] = @intCast(best_bits);
+        out_size[i] = @intCast(best_size);
+        std.debug.print("{}/64\n", .{i+1});
+    }
+
+    std.debug.print("\nentries: {} size: {}kb\n", .{total, (total * 8 + 1023) / 1024});
+
+    std.debug.print("\nmagic:\n", .{});
+    for (out_magic) |magic| {
+        std.debug.print("0x{x:016},\n", .{magic});
+    }
+    std.debug.print("\nbits:\n", .{});
+    for (out_bits) |bits| {
+        std.debug.print("{},\n", .{bits});
+    }
+    var index: u64 = 0;
+    std.debug.print("\nindex:\n", .{});
+    for (out_size) |size| {
+        std.debug.print("{},\n", .{index});
+        index += size;
+    }
+    std.debug.print("{},\n", .{index});
 }
 
 pub const Movegen = struct {
     state: State = .{},
     is_dirty: bool = true,
     
+    bishop_attacks: []u64 = &.{},
+    rook_attacks: []u64 = &.{},
+
     const State = struct {
         white: u64 = 0,
         black: u64 = 0,
@@ -228,12 +607,43 @@ pub const Movegen = struct {
         errdefer alloc.destroy(self);
         self.* = .{};
 
+        self.bishop_attacks = try alloc.alloc(u64, LOOKUPS.bishop_index[64]);
+        self.rook_attacks = try alloc.alloc(u64, LOOKUPS.rook_index[64]);
+
+        for (0..64) |i| {
+            const pos: Square = @intCast(i);
+            const blockers_mask = LOOKUPS.bishop_blockers_mask[i];
+            const key_bits: u5 = @intCast(@popCount(blockers_mask));
+            const magic = LOOKUPS.bishop_magic[i];
+            const shift: u6 = @intCast(63 - LOOKUPS.bishop_shift[i] + 1);
+            const base_index = LOOKUPS.bishop_index[i];
+            for (0..@as(u32, 1)<<key_bits) |j| {
+                const blockers = blockersBoardN(blockers_mask, j);
+                const index = ((blockers *% magic) >> shift) + base_index;
+                self.bishop_attacks[index] = bishopAttacksSlow(pos, blockers);
+            }
+        }
+
+        for (0..64) |i| {
+            const pos: Square = @intCast(i);
+            const blockers_mask = LOOKUPS.rook_blockers_mask[i];
+            const key_bits: u5 = @intCast(@popCount(blockers_mask));
+            const magic = LOOKUPS.rook_magic[i];
+            const shift: u6 = @intCast(63 - LOOKUPS.rook_shift[i] + 1);
+            const base_index = LOOKUPS.rook_index[i];
+            for (0..@as(u32, 1)<<key_bits) |j| {
+                const blockers = blockersBoardN(blockers_mask, j);
+                const index = ((blockers *% magic) >> shift) + base_index;
+                self.rook_attacks[index] = rookAttacksSlow(pos, blockers);
+            }
+        }
+
         return self;
     }
 
     pub fn deinit(self: *Self, alloc: Alloc) void {
-        _ = self;
-        _ = alloc;
+        alloc.free(self.bishop_attacks);
+        alloc.free(self.rook_attacks);
     }
 
     pub fn setDirty(self: *Self) void {
@@ -342,9 +752,25 @@ pub const Movegen = struct {
             },
             .b_pawn => return blackPawnAttacksRev(pos),
             .w_knight, .b_knight => return LOOKUPS.knight_moves[pos],
-            .w_bishop, .b_bishop => return bishopAttacksSlow(pos, blockers),
-            .w_rook, .b_rook => return rookAttacksSlow(pos, blockers),
-            .w_queen, .b_queen => return queenAttacksSlow(pos, blockers),
+            .w_bishop, .b_bishop => {
+                const actual_blockers = LOOKUPS.bishop_blockers_mask[pos] & blockers;
+                const magic = LOOKUPS.bishop_magic[pos];
+                const shift: u6 = @intCast(63 - LOOKUPS.bishop_shift[pos] + 1);
+                const base_index = LOOKUPS.bishop_index[pos];
+                const index = base_index + ((actual_blockers *% magic) >> shift);
+                return self.bishop_attacks[index];
+            },
+            .w_rook, .b_rook => {
+                const actual_blockers = LOOKUPS.rook_blockers_mask[pos] & blockers;
+                const magic = LOOKUPS.rook_magic[pos];
+                const shift: u6 = @intCast(63 - LOOKUPS.rook_shift[pos] + 1);
+                const base_index = LOOKUPS.rook_index[pos];
+                const index = base_index + ((actual_blockers *% magic) >> shift);
+                return self.rook_attacks[index];
+            },
+            //return rookAttacksSlow(pos, blockers),
+            .w_queen, .b_queen => return self.getMovesBitboard(.w_bishop, pos) | self.getMovesBitboard(.w_rook, pos),
+            //return queenAttacksSlow(pos, blockers),
             .w_king => return LOOKUPS.king_moves[pos] | self.whiteKingCastling(),
             .b_king => return LOOKUPS.king_moves[pos],
         }
