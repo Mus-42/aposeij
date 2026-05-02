@@ -754,10 +754,12 @@ fn trimInvalidPvMoves(moves: []const Move) []const Move {
 }
 
 pub const SearchControl = struct {
+    alloc: Alloc,
     // TODO for adding real multithreading turn that into array
     // and do something smart about synchronization
     search_thread_thread: std.Thread,
     search_thread: SearchThread,
+    movegen: *board.Movegen,
     // TODO move that to SearchThread
     brd: Board,
     uci_connection: *uci.UciConnection, 
@@ -776,9 +778,15 @@ pub const SearchControl = struct {
 
     pub fn init(alloc: Alloc, uci_connection: *uci.UciConnection) !*Self {
         const self = try alloc.create(Self);
+        errdefer alloc.destroy(self);
 
+        self.alloc = alloc;
+        self.movegen = try board.Movegen.init(alloc);
+        errdefer self.movegen.deinit(alloc);
+        errdefer alloc.destroy(self.movegen);
         self.mutex = .{};
-        self.brd = try .init(alloc, .DEFAULT);
+        self.brd = try .init(alloc, self.movegen);
+        errdefer self.brd.deinit();
         self.is_searching = false;
         self.is_exiting = false;
         self.cond = .{};
@@ -799,15 +807,16 @@ pub const SearchControl = struct {
         self.search_thread_thread.join();
         self.search_thread.deinit();
         self.brd.deinit();
+        self.movegen.deinit(self.alloc);
+        self.alloc.destroy(self.movegen);
     }
 
-    pub fn startSearch(self: *Self, brd: *const Board, time_controls: TimeControls) !void {
+    pub fn startSearch(self: *Self, time_controls: TimeControls) !void {
         {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            // TODO copy into each thread
-            try self.brd.cloneFrom(brd);
+            // TODO copy board into each thread
             self.time_controls = time_controls;
             self.search_thread.is_exiting_search.store(false, .release);
         }

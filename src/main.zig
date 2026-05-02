@@ -25,9 +25,6 @@ pub fn main() !void {
     var uci_connection = uci.UciConnection.init(&stdin.interface, &stdout.interface, .{ .strict_mode = strict_mode });
     defer uci_connection.deinit(); 
 
-    var brd = try board.Board.init(alloc, .DEFAULT);
-    defer brd.deinit();
-
     var control = try search.SearchControl.init(alloc, &uci_connection);
     defer { 
         control.deinit();
@@ -51,11 +48,11 @@ pub fn main() !void {
             },
             .stop => try control.signalStopSearch(),
             .quit => break,
-            .position => try uci_connection.parsePositionArgs(command.arguments, &brd),
+            .position => try uci_connection.parsePositionArgs(command.arguments, &control.brd),
             .go => {
-                const time_controls = try uci_connection.parseGoArgs(command.arguments, brd.data.side_to_move);
+                const time_controls = try uci_connection.parseGoArgs(command.arguments, control.brd.data.side_to_move);
                 try control.waitUntilSearchEnded();
-                try control.startSearch(&brd, time_controls);
+                try control.startSearch(time_controls);
             },
             .ponderhit => {},
             .ucinewgame => {
@@ -63,10 +60,10 @@ pub fn main() !void {
                 try control.waitUntilSearchEnded();
             },
             .displaypos => {
-                try brd.data.debugPrint(uci_connection.stdout);
+                try control.brd.data.debugPrint(uci_connection.stdout);
                 var buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
-                try uci_connection.stdout.print("{s}\n", .{board.writeFen(&buf, brd.data)});
-                try uci_connection.stdout.print("key: {x}\n", .{brd.data.zobrist_key});
+                try uci_connection.stdout.print("{s}\n", .{board.writeFen(&buf, control.brd.data)});
+                try uci_connection.stdout.print("key: {x}\n", .{control.brd.data.zobrist_key});
                 try uci_connection.stdout.flush();
             },
             .help => {
@@ -82,7 +79,7 @@ pub fn main() !void {
                 uci_connection.lockStdout();
                 defer uci_connection.unlockStdout();
                 const beg = try std.time.Instant.now();
-                const nodes = try perft_root(&brd, depth, uci_connection.stdout);
+                const nodes = try perft_root(&control.brd, depth, uci_connection.stdout);
                 const end = try std.time.Instant.now();
                 const duration = @as(f64, @floatFromInt(end.since(beg))) * (1 / @as(f64, std.time.ns_per_s));
                 const nps = @as(f64, @floatFromInt(nodes)) / duration;
@@ -95,10 +92,16 @@ pub fn main() !void {
                 if (filename.len == 0) {
                     filename = "testfiles/perft.testsuite";
                 }
-                try run_testsuite(alloc, filename, uci_connection.stdout);
+                const bd = control.brd.data;
+                try run_testsuite(alloc, &control.brd, filename, uci_connection.stdout);
+                control.brd.clearHistory();
+                control.brd.setBoardData(bd);
             },
             .bench => {
-                try bench(alloc, uci_connection.stdout);
+                const bd = control.brd.data;
+                try bench(alloc, &control.brd, uci_connection.stdout);
+                control.brd.clearHistory();
+                control.brd.setBoardData(bd);
             },
             .unknown => {
                 if (!uci_connection.options.strict_mode) continue;
@@ -129,12 +132,9 @@ fn writerNoopDrain(_: *std.io.Writer, data: []const []const u8, splat: usize) st
     return count;
 }
 
-fn bench(alloc: Alloc, output: *std.Io.Writer) !void {
+fn bench(alloc: Alloc, brd: *board.Board, output: *std.Io.Writer) !void {
     var search_thread = try search.SearchThread.init(alloc);
     defer search_thread.deinit();
-
-    var brd = try board.Board.init(alloc, .DEFAULT);
-    defer brd.deinit();
 
     var dummy_reader: std.io.Reader = .failing;
     var dummy_writer: std.io.Writer =  .{
@@ -156,7 +156,7 @@ fn bench(alloc: Alloc, output: *std.Io.Writer) !void {
         brd.setBoardData(bd);
 
         search_thread.is_exiting_search.store(false, .release);
-        try search_thread.bestMove(&brd, &dummy_connection, search_time_controls);
+        try search_thread.bestMove(brd, &dummy_connection, search_time_controls);
         nodes += search_thread.nodes;
     }
     const bench_end = std.time.Instant.now() catch unreachable;
@@ -212,7 +212,7 @@ fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     return nodes_count;
 }
 
-fn run_testsuite(alloc: Alloc, filename: []const u8, output: *std.Io.Writer) !void {
+fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: *std.Io.Writer) !void {
     var file = std.fs.cwd().openFile(filename, .{}) catch |err| {
         try output.print("failed to open testsuite file {s}: {}\n", .{filename, err});
         try output.flush();
@@ -238,8 +238,9 @@ fn run_testsuite(alloc: Alloc, filename: []const u8, output: *std.Io.Writer) !vo
     var search_thread = try search.SearchThread.init(alloc);
     defer search_thread.deinit();
 
-    var brd = try board.Board.init(alloc, .DEFAULT);
-    defer brd.deinit();
+
+    const movegen = try board.Movegen.init(alloc);
+    defer alloc.destroy(movegen);
 
     while (true) {
         try reader.rebase(READER_BUF_SIZE);
@@ -268,7 +269,7 @@ fn run_testsuite(alloc: Alloc, filename: []const u8, output: *std.Io.Writer) !vo
 
             const TIME_LIMIT = std.time.ns_per_s * 20;
             search_thread.is_exiting_search.store(false, .release);
-            const mate_in = search_thread.searchToMate(&brd, TIME_LIMIT) catch |err| {
+            const mate_in = search_thread.searchToMate(brd, TIME_LIMIT) catch |err| {
                 switch (err) {
                     error.TimeExpired => {
                         try output.print("failed by time mate in x for fen {s}\n", .{fen});
@@ -300,10 +301,7 @@ fn run_testsuite(alloc: Alloc, filename: []const u8, output: *std.Io.Writer) !vo
                 const depth = try std.fmt.parseInt(u32, depth_str, 10);
                 const expected_count = try std.fmt.parseInt(u32, expected_count_str, 10);
 
-                var b = try board.Board.init(alloc, bd);
-                defer b.deinit();
-
-                const count = perft(&b, depth);
+                const count = perft(brd, depth);
                 
                 if (count != expected_count) {
                     is_passed = false;

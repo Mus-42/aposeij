@@ -150,15 +150,70 @@ pub const CastlingRights = packed struct (u4) {
 // actually less then max possible in chess but way less than you may want to rewind
 const MAX_HISTORY_LEN = 1024; 
 
+const MovegenComptimeLoopups = struct {
+    // magic boards stuff
+    bishop_blockers_mask: [64]u64,
+    rook_blockers_mask: [64]u64,
+    bishop_magic: [64]u64,
+    rook_magic: [64]u64,
+    bishop_shift: [64]u6,
+    rook_shift: [64]u6,
+    bishop_index: [64]usize,
+    rook_index: [64]usize,
+    // precomputed moves
+    knight_moves: [64]u64,
+    king_moves: [64]u64,
+};
+
+const LOOKUPS: MovegenComptimeLoopups = blk: {
+    @setEvalBranchQuota(50000);
+
+    var magic: MovegenComptimeLoopups = .{
+        .bishop_blockers_mask = undefined,
+        .rook_blockers_mask = undefined,
+        .rook_magic = undefined,
+        .bishop_magic = undefined,
+        .rook_shift = undefined,
+        .bishop_shift = undefined,
+        .rook_index = undefined,
+        .bishop_index = undefined,
+        .knight_moves = undefined,
+        .king_moves = undefined,
+    };
+
+    const exclude_ranks = ~rankMask(0) & ~rankMask(7);
+    const exclude_files = ~fileMask(0) & ~fileMask(7);
+
+    for (0..64) |i| {
+        const pos: Square = @intCast(i);
+        const rank: u3 = @intCast(pos >> 3);
+        const file: u3 = @intCast(pos & 7);
+        magic.knight_moves[i] = knightAttacksSlow(pos);
+        magic.king_moves[i] = kingAttacksSlow(pos);
+        const exclude_pos = ~(@as(u64, 1) << pos);
+        magic.bishop_blockers_mask[i] = bishopAttacksSlow(pos, 0) & exclude_ranks & exclude_files & exclude_pos;
+        magic.rook_blockers_mask[i] = ((rankMask(rank) & exclude_files) | (fileMask(file) & exclude_ranks)) & exclude_pos;
+    }
+    
+    break :blk magic;
+};
+
+fn blockersBoardN(blockers: u64, index: u64) u64 {
+    var res: u64 = 0;
+    var block = blockers;
+    while (block != 0) {
+        res |= (index & 1) << @ctz(block);
+        index >>= 1;
+        block &= block - 1;
+    }
+    return res;
+}
+
 pub const Movegen = struct {
-    knight_moves: [64]u64 = @splat(0),
     state: State = .{},
     is_dirty: bool = true,
-    // bishop_moves_mask: [64]u64,
-    // rook_moves_mask: [64]u64,
     
     const State = struct {
-        all: u64 = 0,
         white: u64 = 0,
         black: u64 = 0,
         pieces: [12]u64 = @splat(0),
@@ -173,11 +228,12 @@ pub const Movegen = struct {
         errdefer alloc.destroy(self);
         self.* = .{};
 
-        for (0..64) |i| {
-            self.knight_moves[i] = knightMoves(@intCast(i), 0, 0);
-        }
-
         return self;
+    }
+
+    pub fn deinit(self: *Self, alloc: Alloc) void {
+        _ = self;
+        _ = alloc;
     }
 
     pub fn setDirty(self: *Self) void {
@@ -186,15 +242,14 @@ pub const Movegen = struct {
 
     // is side-to-move king in check?
     pub fn isKingInCheck(self: *const Self) bool {
-        const king_pos: Square = @intCast(@ctz(self.state.pieces[@intFromEnum(PieceKind.w_king)]));
-        return self.isSquareUnderAttack(king_pos);
+        const kings = self.state.pieces[@intFromEnum(PieceKind.w_king)];
+        return self.isAnySquareUnderAttack(kings);
     }
 
     // TODO split into phases (like caputres / quiets ...?)
 
-    pub fn genMoves(self:* Self, board: *const Board.BoardData, movelist: *MoveList) void {
+    pub fn genMoves(self: *Self, board: *const Board.BoardData, movelist: *MoveList) void {
         self.computeState(board);
-
         self.acutallyGenWiteMoves(movelist);
 
         if (board.side_to_move != .white) {
@@ -205,170 +260,114 @@ pub const Movegen = struct {
     }
 
     fn acutallyGenWiteMoves(self: *const Self, movelist: *MoveList) void {
-        self.genWhitePawnMoves(movelist);
-        self.genPieceMoves(knightMoves, movelist, self.state.pieces[@intFromEnum(PieceKind.w_knight)]);
-        self.genPieceMoves(bishopMoves, movelist, self.state.pieces[@intFromEnum(PieceKind.w_bishop)]);
-        self.genPieceMoves(rookMoves,   movelist, self.state.pieces[@intFromEnum(PieceKind.w_rook)]);
-        self.genPieceMoves(queenMoves,  movelist, self.state.pieces[@intFromEnum(PieceKind.w_queen)]);
-        self.genWhiteKingMoves(movelist);
-    }
-
-    fn isSquareUnderAttakByPieceImpl(self: *const Self, comptime movesFn: anytype, pos: Square, piece_bitboard: u64) bool {
-        var piece = piece_bitboard;
         const white = self.state.white;
-        const black = self.state.black;
-        while (piece != 0) : (piece &= piece - 1) {
-            const piece_pos: Square = @intCast(@ctz(piece));
-            if (movesFn(piece_pos, white, black) >> pos & 1 != 0) {
-                return true;
+        inline for (0..6) |i| {
+            const kind: PieceKind = @enumFromInt(i);
+            var pieces = self.state.pieces[i];
+            while (pieces != 0) : (pieces &= pieces - 1) {
+                const from: Square = @intCast(@ctz(pieces));
+                var to_all = self.getMovesBitboard(kind, from) & ~white;
+                while (to_all != 0) : (to_all &= to_all - 1) {
+                    const to: Square = @intCast(@ctz(to_all));
+                    self.emitMoves(kind, from, to, movelist);
+                }
             }
         }
-        return false;
     }
 
-    fn isSquareUnderAttack(self: *const Self, pos: Square) bool {
-        const state = &self.state;
-        const pawns = state.pieces[@intFromEnum(PieceKind.b_pawn)];
-        if (self.isSquareUnderAttakByPieceImpl(blackPawnAttacks, pos, pawns)) {
-            return true;
-        }
-        const knights = state.pieces[@intFromEnum(PieceKind.b_knight)];
-        if (self.isSquareUnderAttakByPieceImpl(knightMoves, pos, knights)) {
-            return true;
-        }
-        const bishops = state.pieces[@intFromEnum(PieceKind.b_bishop)];
-        if (self.isSquareUnderAttakByPieceImpl(bishopMoves, pos, bishops)) {
-            return true;
-        }
-        const rooks = state.pieces[@intFromEnum(PieceKind.b_rook)];
-        if (self.isSquareUnderAttakByPieceImpl(rookMoves, pos, rooks)) {
-            return true;
-        }
-        const queens = state.pieces[@intFromEnum(PieceKind.b_queen)];
-        if (self.isSquareUnderAttakByPieceImpl(queenMoves, pos, queens)) {
-            return true;
-        }
-        const kings = state.pieces[@intFromEnum(PieceKind.b_king)];
-        if (self.isSquareUnderAttakByPieceImpl(kingMoves, pos, kings)) {
-            return true;
-        }
-
-        return false;
-    }
-
-    // TODO
-    fn isAnySquareUnderAttack(self: *const Self, squares: u64) bool {
-        var pos = squares;
-        while (pos != 0) : (pos &= pos - 1) {
-            if (self.isSquareUnderAttack(@intCast(@ctz(pos)))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    fn genPieceMoves(self: *const Self, comptime movesFn: anytype, movelist: *MoveList, piece_bitboard: u64) void {
-        const white = self.state.white;
+    inline fn emitMoves(self: *const Self, comptime kind: PieceKind, from: Square, to: Square, movelist: *MoveList) void {
         const black = self.state.black;
-        var pieces = piece_bitboard;
-        while (pieces != 0) : (pieces &= pieces - 1) {
-            const from: Square = @intCast(@ctz(pieces));
-            var to_all = movesFn(from, white, black) & ~white;
-            while (to_all != 0) : (to_all &= to_all - 1) {
-                const to: Square = @intCast(@ctz(to_all));
+
+        if (kind == .w_pawn) {
+            // ep capture
+            if (self.state.ep_target == to) {
+                @branchHint(.unlikely);
                 movelist.add(.{
                     .from = from,
                     .to = to,
-                    .is_capture = (black >> to & 1) != 0,
-                    .extra = .{ .capture = .none },
+                    .is_capture = true,
+                    .extra = .{ .capture = .ep_capture },
                 });
+                return;
             }
-        }
-    }
 
-    fn genWhiteKingMoves(self: *const Self, movelist: *MoveList) void {
-        const kings = self.state.pieces[@intFromEnum(PieceKind.w_king)];
-        const king_pos: Square = @intCast(@ctz(kings));
-        const white = self.state.white;
-        const black = self.state.black;
-
-        var to_all = kingMoves(king_pos, white, black) & ~white;
-        while (to_all != 0) : (to_all &= to_all - 1) {
-            const to: Square = @intCast(@ctz(to_all));
-            movelist.add(.{
-                .from = king_pos,
-                .to = to,
-                .is_capture = (black >> to & 1) != 0,
-                .extra = .{ .capture = .none },
-            });
-        }
-        
-        to_all = self.whiteKingCastling();
-        while (to_all != 0) : (to_all &= to_all - 1) {
-            const to: Square = @intCast(@ctz(to_all));
-            const extra: Move.QuietSpetial = if (to == 2) .queen_castle else .king_castle;
-            movelist.add(.{
-                .from = king_pos,
-                .to = to,
-                .extra = .{ .quiet = extra },
-            });
-        }
-    }
-
-    fn genWhitePawnMoves(self: *const Self, movelist: *MoveList) void {
-        var pieces = self.state.pieces[@intFromEnum(PieceKind.w_pawn)];
-        const white = self.state.white;
-        const black = self.state.black;
-        const ep_targets = if (self.state.ep_target) |target| @as(u64, 1) << target else 0;
-        while (pieces != 0) : (pieces &= pieces - 1) {
-            const from: Square = @intCast(@ctz(pieces));
-            var to_all = whitePawnMoves(from, white, black, ep_targets) & ~white;
-            while (to_all != 0) : (to_all &= to_all - 1) {
-                const to: Square = @intCast(@ctz(to_all));
-                
-                if (ep_targets >> to & 1 != 0) {
-                    @branchHint(.unlikely);
-
+            // promotion
+            if (to >> 3 == 7) {
+                @branchHint(.unlikely);
+                const PROMOTION_TARGETS = [4]Move.PromotionTarget{ .knight, .bishop, .rook, .queen };
+                inline for (PROMOTION_TARGETS) |target| {
                     movelist.add(.{
                         .from = from,
                         .to = to,
-                        .is_capture = true,
-                        .extra = .{ .capture = .ep_capture },
+                        .is_promotion = true,
+                        .is_capture = (black >> to & 1) != 0,
+                        .extra = .{ .promotion = target },
                     });
-                    continue;
                 }
-                
-                if (to >> 3 == 0 or to >> 3 == 7) {
-                    @branchHint(.unlikely);
-                    const PROMOTION_TARGETS = [4]Move.PromotionTarget{ .knight, .bishop, .rook, .queen };
-                    inline for (PROMOTION_TARGETS) |target| {
-                        movelist.add(.{
-                            .from = from,
-                            .to = to,
-                            .is_promotion = true,
-                            .is_capture = (black >> to & 1) != 0,
-                            .extra = .{ .promotion = target },
-                        });
-                    }
-                    continue;
-                }
-
-                movelist.add(.{
-                    .from = from,
-                    .to = to,
-                    .is_capture = (black >> to & 1) != 0,
-                    .extra = .{ .capture = .none },
-                });
+                return;
             }
         }
+
+        // castle
+        if (kind == .w_king and from == 4 and (to == 2 or to == 6)) {
+            @branchHint(.unlikely);
+            const extra: Move.QuietSpetial = if (to == 2) .queen_castle else .king_castle;
+            movelist.add(.{
+                .from = from,
+                .to = to,
+                .extra = .{ .quiet = extra },
+            });
+            return;
+        }
+
+        // regular move / regular capture
+        movelist.add( .{
+            .from = from,
+            .to = to,
+            .is_capture = (black >> to & 1) != 0,
+            .extra = .{ .capture = .none },
+        });
+    }
+        
+    // white piece -> all moves, black piece -> only attacks (isAttackedBy)
+    fn getMovesBitboard(self: *const Self, comptime kind: PieceKind, pos: Square) u64 {
+        const white = self.state.white;
+        const black = self.state.black;
+        const blockers = white | black;
+
+        switch (kind) {
+            .w_pawn => {
+                const ep = if (self.state.ep_target) |target| @as(u64, 1) << target else 0;
+                return whitePawnMoves(pos, white, black, ep);
+            },
+            .b_pawn => return blackPawnAttacksRev(pos),
+            .w_knight, .b_knight => return LOOKUPS.knight_moves[pos],
+            .w_bishop, .b_bishop => return bishopAttacksSlow(pos, blockers),
+            .w_rook, .b_rook => return rookAttacksSlow(pos, blockers),
+            .w_queen, .b_queen => return queenAttacksSlow(pos, blockers),
+            .w_king => return LOOKUPS.king_moves[pos] | self.whiteKingCastling(),
+            .b_king => return LOOKUPS.king_moves[pos],
+        }
+    }
+
+    fn isAnySquareUnderAttack(self: *const Self, squares: u64) bool {
+        inline for (6..12) |i| {
+            const kind: PieceKind = @enumFromInt(i);
+            var pos = squares;
+            while (pos != 0) : (pos &= pos - 1) {
+                const piece_pos: Square = @intCast(@ctz(pos));
+                if (self.getMovesBitboard(kind, piece_pos) & self.state.pieces[i] != 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     fn whiteKingCastling(self: *const Self) u64 {
         const state = &self.state;
         if (!state.castling.white_kingside and !state.castling.white_queenside) 
             return 0;
-
-        // std.debug.print("can!\n", .{});
 
         std.debug.assert(@ctz(state.pieces[@intFromEnum(PieceKind.w_king)]) == 4);
         std.debug.assert(@popCount(state.pieces[@intFromEnum(PieceKind.w_king)]) == 1);
@@ -412,7 +411,6 @@ pub const Movegen = struct {
         state.white = white;
         state.black = black;
 
-        state.all = white | black;
         state.castling = state.castling.sideFlip();
 
         if (state.ep_target) |*target| {
@@ -436,7 +434,6 @@ pub const Movegen = struct {
 
 
             self.state = .{
-                .all = white | black,
                 .white = white,
                 .black = black,
                 .pieces = board.pieces,
@@ -581,14 +578,12 @@ pub const Board = struct {
     pub const History = std.ArrayListUnmanaged(HistoryEntry);
     pub const Self = @This();
 
-    pub fn init(alloc: Alloc, data: BoardData) !Self {
+    pub fn init(alloc: Alloc, movegen: *Movegen) !Self {
         var history = try History.initCapacity(alloc, MAX_HISTORY_LEN);
         errdefer history.deinit(alloc);
-        const movegen = try Movegen.init(alloc);
-        errdefer alloc.destroy(movegen);
 
         return .{
-            .data = data,
+            .data = .DEFAULT,
             .alloc = alloc,
             .history = history,
             .movegen = movegen,
@@ -597,7 +592,6 @@ pub const Board = struct {
 
     pub fn deinit(self: *Self) void {
         self.history.deinit(self.alloc);
-        self.alloc.destroy(self.movegen);
     }
 
     pub fn cloneFrom(self: *Self, other: *const Self) !void {
@@ -1159,21 +1153,15 @@ fn whitePawnMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64, ep_ta
     return moves | captures;
 }
 
-fn blackPawnAttacks(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
-    _ = white_pieces;
-    _ = black_pieces;
+// "on which square black pawn should stand to attack this square?"
+fn blackPawnAttacksRev(piece_pos: Square) u64 {
     const piece = @as(u64, 1) << piece_pos;
-    const down_raw = bitboardDown(piece);
-
+    const down_raw = bitboardUp(piece);
     const captures = bitboardLeft(down_raw) | bitboardRight(down_raw);
     return captures;
 }
 
-fn knightMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
-    _ = white_pieces;
-    _ = black_pieces;
-
-    // TODO generate moves bitboard and then move it to the position?
+fn knightAttacksSlow(piece_pos: Square) u64 {
     const pos: u64 = @as(u64, 1) << piece_pos;
     const pos_2u = bitboardUp(bitboardUp(pos));
     const pos_2d = bitboardDown(bitboardDown(pos));
@@ -1191,8 +1179,7 @@ fn knightMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
     return moves;
 }
 
-fn bishopMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
-    const all_pieces = white_pieces | black_pieces;
+fn bishopAttacksSlow(piece_pos: Square, blockers: u64) u64 {
     var moves: u64 = 0;
     var pos_a: u64 = @as(u64, 1) << piece_pos;
     var pos_b: u64 = @as(u64, 1) << piece_pos;
@@ -1206,16 +1193,15 @@ fn bishopMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
 
         moves |= pos_a | pos_b | pos_c | pos_d;
 
-        pos_a &= ~all_pieces;
-        pos_b &= ~all_pieces;
-        pos_c &= ~all_pieces;
-        pos_d &= ~all_pieces;
+        pos_a &= ~blockers;
+        pos_b &= ~blockers;
+        pos_c &= ~blockers;
+        pos_d &= ~blockers;
     }
     return moves;
 }
 
-fn rookMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
-    const all_pieces = white_pieces | black_pieces;
+fn rookAttacksSlow(piece_pos: Square, blockers: u64) u64 {
     var moves: u64 = 0;
     var pos_u: u64 = @as(u64, 1) << piece_pos;
     var pos_d: u64 = @as(u64, 1) << piece_pos;
@@ -1229,21 +1215,19 @@ fn rookMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
 
         moves |= pos_u | pos_d | pos_l | pos_r;
 
-        pos_u &= ~all_pieces;
-        pos_d &= ~all_pieces;
-        pos_l &= ~all_pieces;
-        pos_r &= ~all_pieces;
+        pos_u &= ~blockers;
+        pos_d &= ~blockers;
+        pos_l &= ~blockers;
+        pos_r &= ~blockers;
     }
     return moves;
 }
 
-fn queenMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
-    return rookMoves(piece_pos, white_pieces, black_pieces) | bishopMoves(piece_pos, white_pieces, black_pieces);
+fn queenAttacksSlow(piece_pos: Square, blockers: u64) u64 {
+    return rookAttacksSlow(piece_pos, blockers) | bishopAttacksSlow(piece_pos, blockers);
 }
 
-fn kingMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64) u64 {
-    _ = white_pieces;
-    _ = black_pieces;
+fn kingAttacksSlow(piece_pos: Square) u64 {
     const pos: u64 = @as(u64, 1) << piece_pos;
     const vertical = bitboardUp(pos) | pos | bitboardDown(pos);
     const moves = bitboardLeft(vertical) | vertical | bitboardRight(vertical);
