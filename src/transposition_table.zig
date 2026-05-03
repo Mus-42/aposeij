@@ -98,7 +98,7 @@ pub const TTable = struct {
     fn indicies(self: *const Self, zobrist_key: u64) struct { u32, u16 } {
         // TODO pick a better one?
         const TT_MAGICK = 0x35C25ADD731CCD89;
-        const key: u64 = (zobrist_key *% TT_MAGICK) >> 8;
+        const key: u64 = (zobrist_key *% TT_MAGICK) >> 16;
         const index: u32 = @intCast((key >> 16) % self.buckets.len);
         const lower_key: u16 = @intCast(key & 0xFFFF);
         return .{ index, lower_key };
@@ -138,9 +138,6 @@ pub const TTable = struct {
             tt_bucket.entries[1..4].* = tt_bucket.entries[0..3].*;
             tt_bucket.key_low[1..4].* = tt_bucket.key_low[0..3].*;
             entry_i = 0;
-        } else {
-            if (tt_bucket.entries[entry_i].depth > depth)
-                return;
         }
 
         tt_bucket.key_low[entry_i] = lower_key;

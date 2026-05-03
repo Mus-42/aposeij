@@ -270,7 +270,7 @@ pub const SearchThread = struct {
 
         if (move.is_capture) {
             // TODO SSE
-            const material = evaluation.captureMoveMaterial(self.brd.data, move);
+            const material = evaluation.captureMoveMaterial(self.brd.data, move) + self.history.getNoisy(self.brd.data.side_to_move, move);
 
             if (material >= 0) {
                 return MOVESCORE_GOOD_CAPTURE + material;
@@ -654,6 +654,25 @@ pub const SearchThread = struct {
                 self.pv.setMoveAtPly(move, ply);
 
                 tt_bound = .lower;
+
+
+                const color = self.brd.data.side_to_move;
+                const bonus: i16 = @intCast(remaining_depth * remaining_depth);
+                if (!move.is_capture) {
+                    self.history.updateQuiet(color, best_move, bonus);
+                    for (moves.moves()) |quiet| {
+                        if (quiet.is_capture) continue;
+                        if (quiet == best_move) break;
+                        self.history.updateQuiet(color, quiet, -bonus);
+                    }
+                } else {
+                    self.history.updateNoisy(color, best_move, bonus);
+                    for (moves.moves()) |noisy| {
+                        if (noisy.is_capture) continue;
+                        if (noisy == best_move) break;
+                        self.history.updateNoisy(color, noisy, -bonus);
+                    }
+                }
                 break;
             }
 
@@ -670,14 +689,6 @@ pub const SearchThread = struct {
         }
 
         if (best_move != Move.NULL and !best_move.is_capture and tt_bound == .lower) {
-            const color = self.brd.data.side_to_move;
-            const bonus: i16 = @intCast(remaining_depth * remaining_depth);
-            self.history.updateQuiet(color, best_move, bonus);
-            for (moves.moves()) |move| {
-                if (move.is_capture) continue;
-                if (move == best_move) break;
-                self.history.updateQuiet(color, move, -bonus);
-            }
         }
 
         if (legal_moves == 0) {

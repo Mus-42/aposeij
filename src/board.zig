@@ -1545,7 +1545,7 @@ pub const MoveList = struct {
     pub fn filterCapturesOnly(self: *Self) void {
         var i: usize = 0;
         for (0..self.i) |j| {
-            if (self.p[j].is_capture) {
+            if (self.p[j].is_capture or self.p[j].is_promotion) {
                 self.p[i] = self.p[j];
                 i += 1;
             }
