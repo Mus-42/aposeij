@@ -20,7 +20,7 @@ pub const SCORE_MATE_ABS = 32000;
 pub const SCORE_MATE_EPS = MAX_PLY;
 pub const SCORE_INFINITY = SCORE_MATE_ABS+1;
 
-pub const TIME_EPS_NS: u64 = 200;
+pub const TIME_EPS_NS: u64 = 2000;
 
 
 // order:
@@ -375,9 +375,6 @@ pub const SearchThread = struct {
         var moves = board.MoveList{};
         self.brd.movegen.genMoves(&self.brd.data, &moves);
     
-        // if (!in_check) {
-        //     moves.filterCapturesOnly();
-        // }
         moves.filterCapturesOnly();
 
         const moves_len = moves.count();
@@ -394,8 +391,8 @@ pub const SearchThread = struct {
         for (moves.moves()) |move| {
             // TODO lower that when SEE move ordering is implemented
             // (for now fails SPRT)
-            // if (!in_check and moves_played >= 4)
-            //     break;
+            if (!in_check and moves_played >= 4)
+                break;
 
             if (self.brd.makeMove(move))
                 continue;
@@ -600,10 +597,10 @@ pub const SearchThread = struct {
         for (moves.moves(), scores) |move, score| {
             if (self.brd.makeMove(move))
                 continue;
+            legal_moves += 1;
 
             const new_in_check = self.brd.data.is_in_check;
 
-            legal_moves += 1;
             var search_ext: u32 = 0;
             if (new_in_check) {
                 search_ext += 1;
@@ -620,19 +617,19 @@ pub const SearchThread = struct {
             var reduction: u32 = 0;
             if (legal_moves > 4 and remaining_depth > 1 and !in_check and score < 0) {
                 reduction = 1;
-                // score < MOVESCORE_KILLER
-                // reduction = ???;
-                // reduction -|= @intFromBool(is_pv_node);
+                if (!is_pv_node and remaining_depth > 2 and legal_moves > 8) {
+                    if (tt_move.is_capture) {
+                        reduction += 1;
+                    }
+                }
             }
-
-            // TODO figure out this crap, it fails SPRT on itself
 
             // PVS
             var move_eval: i16 = -SCORE_INFINITY;
             if (remaining_depth < 2 or legal_moves < 3) {
                 move_eval = -self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext, false);
             } else {
-                // TODO remove extensions from this those 2
+                // TODO remove seach extensions from heare when moveordering is better
                 move_eval = -self.search(.NonPv, -(alpha+1), -alpha, remaining_depth - 1 - reduction + search_ext, ply + 1, extensions_used + search_ext, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
                     move_eval = -self.search(.Pv, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext, false);
@@ -658,20 +655,21 @@ pub const SearchThread = struct {
 
                 const color = self.brd.data.side_to_move;
                 const bonus: i16 = @intCast(remaining_depth * remaining_depth);
-                if (!move.is_capture) {
+                if (!best_move.is_capture) {
                     self.history.updateQuiet(color, best_move, bonus);
                     for (moves.moves()) |quiet| {
-                        if (quiet.is_capture) continue;
                         if (quiet == best_move) break;
+                        if (quiet.is_capture) continue;
                         self.history.updateQuiet(color, quiet, -bonus);
                     }
                 } else {
                     self.history.updateNoisy(color, best_move, bonus);
-                    for (moves.moves()) |noisy| {
-                        if (noisy.is_capture) continue;
-                        if (noisy == best_move) break;
-                        self.history.updateNoisy(color, noisy, -bonus);
-                    }
+                }
+
+                for (moves.moves()) |noisy| {
+                    if (noisy == best_move) break;
+                    if (!noisy.is_capture) continue;
+                    self.history.updateNoisy(color, noisy, -bonus);
                 }
                 break;
             }
@@ -707,11 +705,6 @@ pub const SearchThread = struct {
         return eval;
     }
 
-    pub fn timeRemaining(self: *Self) u64 {
-        const now = std.time.Instant.now() catch unreachable;
-        return self.available_time -| now.since(self.search_start);
-    }
-
     pub fn bestMove(self: *Self, brd: *Board, uci_connection: *uci.UciConnection) !void {
         self.brd = brd;
         
@@ -735,7 +728,6 @@ pub const SearchThread = struct {
             const search_time = search_iteration_end.since(self.time_controls.search_start);
 
             const pv_move = self.pv.perPlyRaw(0)[0];
-            // if (!self.time_controls.isStopSet()) {
             if (pv_move != Move.NULL) {
                 best_move = pv_move;
 

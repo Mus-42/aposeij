@@ -87,7 +87,7 @@ pub fn captureMoveMaterial(bd: Board.BoardData, move: Move) i16 {
     const cost_from = if (from < 6) PIECE_COST[from] else PIECE_COST[from - 6];
     const cost_to = if (to < 6) PIECE_COST[to] else PIECE_COST[to - 6];
     
-    return cost_to * 4 - cost_from;
+    return cost_to * 6 - cost_from;
 }
 
 pub fn whiteEval(bd: Board.BoardData) i16 {

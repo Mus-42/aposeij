@@ -46,7 +46,7 @@ pub const History = struct {
 
     pub fn updateNoisy(self: *Self, color: board.SideToMove, move: Move, raw_bonus: i32) void {
         const i = butterflyIndex(color, move);
-        const MAX_BONUS = search.MOVESCORE_KILLER;
+        const MAX_BONUS = 0x1000;//search.MOVESCORE_KILLER;
         const bonus = @max(@min(raw_bonus, MAX_BONUS), -MAX_BONUS);
         const value = &self.butterfly_entries[i].noisy_hist;
         value.* +|= @intCast(bonus - @divTrunc(@as(i32, value.*) * @as(i32, @intCast(@abs(bonus))), MAX_BONUS));
