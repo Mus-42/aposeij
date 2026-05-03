@@ -87,8 +87,12 @@ pub const TimeControls = struct {
         self.search_start = std.time.Instant.now() catch unreachable;
     }
 
+    pub fn isStopSet(self: *Self) bool {
+        return self.is_exiting_search.load(.unordered);
+    }
+
     pub fn isHardStop(self: *Self, nodes: u64, qnodes: u64) bool {
-        if (self.is_exiting_search.load(.unordered))
+        if (self.isStopSet())
             return true;
         if (nodes >= self.nodes_limit) {
             self.is_exiting_search.store(true, .unordered);
@@ -106,7 +110,7 @@ pub const TimeControls = struct {
     }
 
     pub fn isSoftStop(self: *Self, depth: u32) bool {
-        if (self.is_exiting_search.load(.unordered))
+        if (self.isStopSet())
             return true;
         if (depth >= self.depth_limit) {
             self.is_exiting_search.store(true, .unordered);
@@ -138,19 +142,25 @@ pub fn wipEstimateGamePhase(bd: board.Board.BoardData) i16 {
 }
 
 const PVMoves = struct {
+    root_pv: []Move,
     pv_moves: []Move,
     pv_len: []u16,
 
     const Self = @This();
 
     fn init(alloc: Alloc) !Self {
+        const root_pv = try alloc.alloc(Move, MAX_PLY);
+        errdefer alloc.free(root_pv);
         const pv_moves = try alloc.alloc(Move, MAX_PLY * (MAX_PLY + 1) / 2);
+        errdefer alloc.free(pv_moves);
         const pv_len = try alloc.alloc(u16, MAX_PLY);
+        errdefer alloc.free(pv_len);
 
-        return .{ .pv_moves = pv_moves, .pv_len = pv_len };
+        return .{ .root_pv = root_pv, .pv_moves = pv_moves, .pv_len = pv_len };
     }
 
     fn deinit(self: *Self, alloc: Alloc) void {
+        alloc.free(self.root_pv);
         alloc.free(self.pv_moves);
         alloc.free(self.pv_len);
     }
@@ -165,6 +175,10 @@ const PVMoves = struct {
         return self.perPlyRaw(ply)[0..self.pv_len[ply]];
     }
 
+    fn clearRoot(self: *Self) void {
+        @memset(self.root_pv, Move.NULL);
+    }
+
     fn clearPly(self: *Self, ply: u32) void {
         self.perPlyRaw(ply)[0] = Move.NULL;
         self.pv_len[ply] = 0;
@@ -176,6 +190,12 @@ const PVMoves = struct {
         @memcpy(pv[1..][0..next_pv.len], next_pv);
         pv[0] = move;
         self.pv_len[ply] = @intCast(1 + next_pv.len);
+    }
+
+    fn updateRootPv(self: *Self) void {
+        const pv = self.perPly(0);
+        @memcpy(self.root_pv[0..pv.len], pv);
+        @memset(self.root_pv[pv.len..], Move.NULL);
     }
 };
 
@@ -235,7 +255,7 @@ pub const SearchThread = struct {
         self.qsearch_nodes = 0;
     }
 
-    fn scoreMove(self: *Self, move: Move, ply: u32, tt_move: ?Move) i16 {
+    fn scoreMove(self: *Self, move: Move, ply: u32, tt_move: Move) i16 {
         if (tt_move == move) {
             return MOVESCORE_TT;
         }
@@ -263,7 +283,7 @@ pub const SearchThread = struct {
         return @min(@max(move_history, MOVESCORE_BAD_CAPTURE), MOVESCORE_KILLER);
     }
 
-    fn orderMoves(self: *Self, moves: []Move, scores: []i16, ply: u32, tt_move: ?Move) void {
+    fn orderMoves(self: *Self, moves: []Move, scores: []i16, ply: u32, tt_move: Move) void {
         const Context = struct {
             bot: *Self,
             moves: []Move,
@@ -288,7 +308,7 @@ pub const SearchThread = struct {
 
     fn qsearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, root_beta: i16, ply: u32) i16 {
         if (self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
-            return 0;
+            return root_alpha;
         }
 
         const in_check = self.brd.data.is_in_check;
@@ -312,7 +332,7 @@ pub const SearchThread = struct {
         var eval = self.evalPosition();
 
         const zobrist_key = self.brd.data.zobrist_key;
-        var tt_move: ?Move = null;
+        var tt_move: Move = .NULL;
 
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             if (!is_pv_node and (tt_entry.bound == .exact or 
@@ -390,13 +410,12 @@ pub const SearchThread = struct {
             //     continue;
             // }
 
-
             std.debug.assert(move.is_capture);
             const move_eval = -self.qsearch(node_type, -beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
-            if (self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
-                break;
+            if (self.time_controls.isStopSet()) {
+                return alpha;
             }
 
             if (move_eval >= beta) {
@@ -430,9 +449,6 @@ pub const SearchThread = struct {
             return eval;
         }
 
-        if (self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
-            return 0;
-        }
         
         self.tt.put(zobrist_key, ply, QS_TT_DEPTH, eval, tt_bound, best_move);
 
@@ -459,7 +475,7 @@ pub const SearchThread = struct {
         allow_null: bool,
     ) i16 {
         if (ply > 0 and self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
-            return 0;
+            return root_alpha;
         }
 
         const in_check = self.brd.data.is_in_check;
@@ -484,7 +500,7 @@ pub const SearchThread = struct {
             return 0;
 
         const zobrist_key = self.brd.data.zobrist_key;
-        var tt_move: ?Move = null;
+        var tt_move: Move = .NULL;
 
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             if (!is_pv_node and tt_entry.depth >= remaining_depth and ply > 0) { 
@@ -505,10 +521,13 @@ pub const SearchThread = struct {
             // }
         }
 
+        if (ply == 0 and self.pv.root_pv[0] != Move.NULL) {
+            tt_move = self.pv.root_pv[0];
+        }
+
         const static_eval = self.qsearch(node_type, alpha, beta, ply);
-        if (ply > 0 and self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
-            // TODO?
-            return 0;
+        if (self.time_controls.isStopSet()) {
+            return alpha;
         }
 
         if (remaining_depth == 0) {
@@ -539,6 +558,10 @@ pub const SearchThread = struct {
                     const depth_reduction = @min(1 + remaining_depth/2, 4);
                     const nm_score = -self.search(.NonPv, -beta, -beta + 1, remaining_depth - depth_reduction, ply+1, extensions_used, false);
                     self.brd.unmakeNullMove();
+                    if (self.time_controls.isStopSet()) {
+                        return alpha;
+                    }
+
                     if (nm_score >= beta) {
                         return nm_score;
                         // TODO more conditions on NMP / double -> enable verification
@@ -618,8 +641,8 @@ pub const SearchThread = struct {
 
             self.brd.unmakeMove();
 
-            if (ply > 0 and self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
-                break;
+            if (self.time_controls.isStopSet()) {
+                return alpha;
             }
 
             if (move_eval >= beta) {
@@ -646,14 +669,6 @@ pub const SearchThread = struct {
             }
         }
 
-        if (legal_moves == 0) {
-            std.debug.assert(ply > 0);
-            if (in_check) {
-                return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
-            }
-            return 0;
-        }
-
         if (best_move != Move.NULL and !best_move.is_capture and tt_bound == .lower) {
             const color = self.brd.data.side_to_move;
             const bonus: i16 = @intCast(remaining_depth * remaining_depth);
@@ -665,14 +680,16 @@ pub const SearchThread = struct {
             }
         }
 
-        std.debug.assert(ply != 0 or best_move != Move.NULL);
-        std.debug.assert(self.pv.perPly(ply)[0] == best_move);
-
-        // prevent storing to tt 
-        if (ply > 0 and self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
-            // TODO save to TT as lower bound instead
+        if (legal_moves == 0) {
+            std.debug.assert(ply > 0);
+            if (in_check) {
+                return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
+            }
             return 0;
         }
+
+        std.debug.assert(ply != 0 or best_move != Move.NULL);
+        std.debug.assert(self.pv.perPly(ply)[0] == best_move);
 
         self.tt.put(zobrist_key, ply, @intCast(remaining_depth), eval, tt_bound, best_move);
 
@@ -688,6 +705,7 @@ pub const SearchThread = struct {
         self.brd = brd;
         
         self.history.reset();
+        self.pv.clearRoot();
         self.time_controls.startSearch();
 
         var best_move: Move = .NULL;
@@ -700,13 +718,16 @@ pub const SearchThread = struct {
 
             const search_iteration_beg = std.time.Instant.now() catch unreachable;
             const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+            self.pv.updateRootPv();
             const search_iteration_end = std.time.Instant.now() catch unreachable;
             const iteration_time = search_iteration_end.since(search_iteration_beg);
             const search_time = search_iteration_end.since(self.time_controls.search_start);
 
-            const is_canceled = self.time_controls.is_exiting_search.load(.unordered);
+            const pv_move = self.pv.perPlyRaw(0)[0];
+            // if (!self.time_controls.isStopSet()) {
+            if (pv_move != Move.NULL) {
+                best_move = pv_move;
 
-            if (!is_canceled) {
                 const info: uci.SearchInfo = .{
                     .depth = d,
                     .time_ms = search_time / std.time.ns_per_ms,
@@ -720,12 +741,6 @@ pub const SearchThread = struct {
             }
 
             const is_exiting = self.time_controls.isSoftStop(d);
-            // for now don't trust unfinished iterations if ply > 0
-            if (!is_exiting or d == 1) {
-                best_move = self.pv.perPly(0)[0];
-                std.debug.assert(best_move != Move.NULL);
-            }
-
             if (is_exiting) {
                 break;
             }
@@ -751,7 +766,7 @@ pub const SearchThread = struct {
             self.preSearchCleanup();
 
             const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
-            const is_canceled = self.time_controls.is_exiting_search.load(.unordered);
+            const is_canceled = self.time_controls.isStopSet();
             
             if (is_canceled) {
                 return error.TimeExpired;
