@@ -243,30 +243,31 @@ pub const UciConnection = struct {
         // TODO better way to check that
         // TODO movestogo
 
-        var time_controls: search.TimeControls = .{ .to_depth = .{ .target = 8 } };
+        var time_controls: search.TimeControls = .toDepth(8);
 
         if (args.infinite) {
-            time_controls = .infinite;
+            time_controls = .infinite();
             args.infinite = false;
         } else if (args.depth) |depth| {
-            time_controls = .{ .to_depth = .{ .target = depth } };
+            time_controls = .toDepth(depth);
             args.depth = null;
         } else if (args.nodes) |nodes| {
-            time_controls = .{ .nodes = .{ .hard_limit = nodes } };
+            time_controls = .toNodes(nodes);
             args.nodes = null;
         } else if (args.movetime) |time| {
-            time_controls = .{ .time_remaining = .{ .ns = std.time.ns_per_ms * @as(u64, time) } };
+            const limit_ns = std.time.ns_per_ms * @as(u64, time);
+            time_controls = .toTime(limit_ns);
             args.movetime = null;
         } else {
             // TODO move that to other function
             if (side_to_move == .white and args.wtime != null) {
                 const time_ns = std.time.ns_per_ms * @as(u64, args.wtime.?) / 20 + std.time.ns_per_ms * @as(u64, args.winc orelse 0) / 2;
-                time_controls = .{ .time_remaining = .{ .ns = time_ns } };
+                time_controls = .toTime(time_ns);
                 args.wtime = null;
             }
             if (side_to_move == .black and args.btime != null) {
                 const time_ns = std.time.ns_per_ms * @as(u64, args.btime.?) / 20 + std.time.ns_per_ms * @as(u64, args.binc orelse 0) / 2;
-                time_controls = .{ .time_remaining = .{ .ns = time_ns } };
+                time_controls = .toTime(time_ns);
                 args.btime = null;
             }
         }

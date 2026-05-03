@@ -147,16 +147,16 @@ fn bench(alloc: Alloc, brd: *board.Board, output: *std.Io.Writer) !void {
     var dummy_connection: uci.UciConnection = .init(&dummy_reader, &dummy_writer, .{});
     defer dummy_connection.deinit();
 
-    const search_time_controls = search.TimeControls { .to_depth = .{ .target = 8 } };
+    const search_time_controls: search.TimeControls = .toDepth(8);
 
     var nodes: u64 = 0;
     const bench_beg = std.time.Instant.now() catch unreachable;
     for (BENCH_FENS) |fen| {
         const bd = board.readFen(fen) catch unreachable;
         brd.setBoardData(bd);
-
-        search_thread.is_exiting_search.store(false, .release);
-        try search_thread.bestMove(brd, &dummy_connection, search_time_controls);
+    
+        search_thread.time_controls = search_time_controls;
+        try search_thread.bestMove(brd, &dummy_connection);
         nodes += search_thread.nodes;
     }
     const bench_end = std.time.Instant.now() catch unreachable;
@@ -267,8 +267,8 @@ fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: 
             brd.setBoardData(bd);
 
             const TIME_LIMIT = std.time.ns_per_s * 20;
-            search_thread.is_exiting_search.store(false, .release);
-            const mate_in = search_thread.searchToMate(brd, TIME_LIMIT) catch |err| {
+            search_thread.time_controls = .toTime(TIME_LIMIT);
+            const mate_in = search_thread.searchToMate(brd) catch |err| {
                 switch (err) {
                     error.TimeExpired => {
                         try output.print("failed by time mate in x for fen {s}\n", .{fen});
