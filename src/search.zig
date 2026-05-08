@@ -122,27 +122,6 @@ pub const TimeControls = struct {
     }
 };
 
-pub fn wipEstimateGamePhase(bd: board.Board.BoardData) i16 {
-    const VALUES: [5]i16 = .{ 10, 90, 100, 120, 200 };
-
-    var score: i16 = 0;
-    inline for (0..5) |i| {
-        score += VALUES[i] * (@popCount(bd.pieces[i]) + @popCount(bd.pieces[i + 6]));
-    }
-
-    if (score < 900) {
-        return 4000;
-    } else if (score < 1250) {
-        return 3000;
-    } else if (score < 1450) {
-        return 2000;
-    } else if (score < 1600) {
-        return 1000;
-    }
-
-    return 0;
-}
-
 const PVMoves = struct {
     root_pv: []Move,
     pv_moves: []Move,
@@ -358,7 +337,6 @@ pub const SearchThread = struct {
         if (ply >= MAX_PLY)
             return eval;
 
-
         if (eval >= beta) {
             return eval;
         }
@@ -374,7 +352,6 @@ pub const SearchThread = struct {
         if (eval > alpha) {
             alpha = eval;
         }
-
 
         var moves = board.MoveList{};
         self.brd.movegen.genMoves(&self.brd.data, &moves);
@@ -401,17 +378,8 @@ pub const SearchThread = struct {
             if (self.brd.makeMove(move))
                 continue;
 
-
             moves_played += 1;
 
-            // TODO do something about draw
-            // if (!move.is_capture) {
-            //     // TODO
-            //     self.brd.unmakeMove();
-            //     continue;
-            // }
-
-            // std.debug.assert(move.is_capture);
             const move_eval = -self.qsearch(node_type, -beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
@@ -424,12 +392,10 @@ pub const SearchThread = struct {
                 best_move = move;
                 self.pv.setMoveAtPly(move, ply);
                 eval = move_eval;
-                // return move_eval;
                 break;
             }
 
             if (move_eval > eval) {
-                // TODO update pv?
                 eval = move_eval;
                 best_move = move;
                 self.pv.setMoveAtPly(move, ply);
@@ -440,16 +406,15 @@ pub const SearchThread = struct {
             }
         }
 
-        // TODO commenting this out gives -2 elo
         // No legal moves
-        // TODO smarter condition
+        // TODO figure it out
         // TODO that doesn't work becasue we skipping quiet moves in qsearch
-        if (moves_played == 0) {
-            if (in_check) {
-                return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
-            }
-            return eval;
-        }
+        // if (moves_played == 0) {
+        //     if (in_check) {
+        //         return @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
+        //     }
+        //     return eval;
+        // }
         
         self.tt.put(zobrist_key, ply, QS_TT_DEPTH, eval, tt_bound, best_move);
 
