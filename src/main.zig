@@ -10,24 +10,23 @@ const Alloc = std.mem.Allocator;
 var stdin_buf: [uci.MAX_COMMAND_LEN]u8 = undefined;
 var stdout_buf: [256]u8 = undefined;
 
-pub fn main() !void {
-    // TODO use real allocator here in release builds
-    var debug_alloc = std.heap.DebugAllocator(.{}).init;
-    defer std.debug.assert(debug_alloc.deinit() == .ok);
-    const alloc = debug_alloc.allocator();
+pub fn main(init: std.process.Init) !void {
+    const alloc = init.gpa;
+    const io = init.io;
 
-    var stdin = std.fs.File.stdin().reader(&stdin_buf);
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
+    var stdin = std.Io.File.stdin().reader(io, &stdin_buf);
+    var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
+
 
     // TODO cli option to override
-    const strict_mode = std.fs.File.stdin().isTty();
+    const strict_mode = std.Io.File.stdin().isTty(io) catch unreachable;
 
-    var uci_connection = uci.UciConnection.init(&stdin.interface, &stdout.interface, .{ .strict_mode = strict_mode });
+    var uci_connection = uci.UciConnection.init(io, &stdin.interface, &stdout.interface, .{ .strict_mode = strict_mode });
     defer uci_connection.deinit(); 
 
-    var control = try search.SearchControl.init(alloc, &uci_connection);
+    var control = try search.SearchControl.init(alloc, io, &uci_connection);
     defer { 
-        control.deinit();
+        control.deinit() catch {};
         alloc.destroy(control);
     }
 
@@ -76,12 +75,11 @@ pub fn main() !void {
                     try uci_connection.stdout.flush();
                     continue;
                 };
-                uci_connection.lockStdout();
+                try uci_connection.lockStdout();
                 defer uci_connection.unlockStdout();
-                const beg = try std.time.Instant.now();
+                const beg = std.Io.Timestamp.now(io, .awake);
                 const nodes = try perft_root(&control.brd, depth, uci_connection.stdout);
-                const end = try std.time.Instant.now();
-                const duration = @as(f64, @floatFromInt(end.since(beg))) * (1 / @as(f64, std.time.ns_per_s));
+                const duration = @as(f64, @floatFromInt(beg.untilNow(io, .awake).nanoseconds)) * (1 / @as(f64, std.time.ns_per_s));
                 const nps = @as(f64, @floatFromInt(nodes)) / duration;
                 try uci_connection.stdout.print("nodes: {}\n", .{nodes});
                 try uci_connection.stdout.print("nps: {d}\n", .{nps});
@@ -93,13 +91,13 @@ pub fn main() !void {
                     filename = "testfiles/perft.testsuite";
                 }
                 const bd = control.brd.data;
-                try run_testsuite(alloc, &control.brd, filename, uci_connection.stdout);
+                try run_testsuite(alloc, io, &control.brd, filename, uci_connection.stdout);
                 control.brd.clearHistory();
                 control.brd.setBoardData(bd);
             },
             .bench => {
                 const bd = control.brd.data;
-                try bench(alloc, &control.brd, uci_connection.stdout);
+                try bench(alloc, io, &control.brd, uci_connection.stdout);
                 control.brd.clearHistory();
                 control.brd.setBoardData(bd);
             },
@@ -125,32 +123,33 @@ const BENCH_FENS: []const []const u8 = &.{
     "r1bqkb1r/ppp1pppp/2np4/3nP3/2PP4/5N2/PP3PPP/RNBQKB1R b KQkq - 0 5",
 };
 
-fn writerNoopDrain(_: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
+fn writerNoopDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
     if (data.len == 0) return 0;
     var count: usize = data[data.len-1].len * splat;
     for (data[0..data.len-1]) |buf| count += buf.len;
     return count;
 }
 
-fn bench(alloc: Alloc, brd: *board.Board, output: *std.Io.Writer) !void {
-    var search_thread = try search.SearchThread.init(alloc);
+fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !void {
+    var search_thread = try search.SearchThread.init(alloc, io);
     defer search_thread.deinit();
 
-    var dummy_reader: std.io.Reader = .failing;
-    var dummy_writer: std.io.Writer =  .{
+    var dummy_reader: std.Io.Reader = .failing;
+    var dummy_writer: std.Io.Writer =  .{
         .vtable = &.{
             .drain = writerNoopDrain,
-            .flush = std.io.Writer.noopFlush,
+            .flush = std.Io.Writer.noopFlush,
         },
         .buffer = &.{},
     };
-    var dummy_connection: uci.UciConnection = .init(&dummy_reader, &dummy_writer, .{});
+    var dummy_connection: uci.UciConnection = .init(io, &dummy_reader, &dummy_writer, .{});
     defer dummy_connection.deinit();
 
-    const search_time_controls: search.TimeControls = .toDepth(8);
+    const search_time_controls: search.TimeControls = .toDepth(io, 8);
 
     var nodes: u64 = 0;
-    const bench_beg = std.time.Instant.now() catch unreachable;
+
+    const beg = std.Io.Timestamp.now(io, .awake);
     for (BENCH_FENS) |fen| {
         const bd = board.readFen(fen) catch unreachable;
         brd.setBoardData(bd);
@@ -159,9 +158,8 @@ fn bench(alloc: Alloc, brd: *board.Board, output: *std.Io.Writer) !void {
         try search_thread.bestMove(brd, &dummy_connection);
         nodes += search_thread.nodes;
     }
-    const bench_end = std.time.Instant.now() catch unreachable;
-    const bench_time = @as(f64, @floatFromInt(bench_end.since(bench_beg))) / std.time.ns_per_s;
-    try output.print("{} nodes in {}s\n{} nps\n", .{nodes, bench_time, @as(f64, @floatFromInt(nodes)) / bench_time});
+    const duration = @as(f64, @floatFromInt(beg.untilNow(io, .awake).nanoseconds)) * (1 / @as(f64, std.time.ns_per_s));
+    try output.print("{} nodes in {}s\n{} nps\n", .{nodes, duration, @as(f64, @floatFromInt(nodes)) / duration});
     try output.flush();
 }
 
@@ -212,13 +210,13 @@ fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     return nodes_count;
 }
 
-fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: *std.Io.Writer) !void {
-    var file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+fn run_testsuite(alloc: Alloc, io: std.Io, brd: *board.Board, filename: []const u8, output: *std.Io.Writer) !void {
+    var file = std.Io.Dir.cwd().openFile(io, filename, .{}) catch |err| {
         try output.print("failed to open testsuite file {s}: {}\n", .{filename, err});
         try output.flush();
         return;
     };
-    defer file.close();
+    defer file.close(io);
 
     try output.print("Running testsuite {s}\n", .{filename});
     try output.flush();
@@ -226,7 +224,7 @@ fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: 
     const READER_BUF_SIZE = 1024;
     var reader_buf: [READER_BUF_SIZE]u8 = undefined;
     var fen_buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
-    var file_reader = file.reader(&reader_buf);
+    var file_reader = file.reader(io, &reader_buf);
     const reader = &file_reader.interface;
 
     var total: u32 = 0;
@@ -235,7 +233,7 @@ fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: 
 
     var bd = board.Board.BoardData.DEFAULT;
 
-    var search_thread = try search.SearchThread.init(alloc);
+    var search_thread = try search.SearchThread.init(alloc, io);
     defer search_thread.deinit();
 
     const movegen = try board.Movegen.init(alloc);
@@ -267,7 +265,7 @@ fn run_testsuite(alloc: Alloc, brd: *board.Board, filename: []const u8, output: 
             brd.setBoardData(bd);
 
             const TIME_LIMIT = std.time.ns_per_s * 20;
-            search_thread.time_controls = .toTime(TIME_LIMIT);
+            search_thread.time_controls = .toTime(io, TIME_LIMIT);
             const mate_in = search_thread.searchToMate(brd) catch |err| {
                 switch (err) {
                     error.TimeExpired => {

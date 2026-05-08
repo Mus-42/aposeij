@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     var exit_code: u8 = undefined;
-    const git_commit = b.runAllowFail(&.{ "git", "rev-parse", "--short", "HEAD" }, &exit_code, .Ignore) catch "unknown";
+    const git_commit = b.runAllowFail(&.{ "git", "rev-parse", "--short", "HEAD" }, &exit_code, .ignore) catch "unknown";
 
     const aposeij_options = b.addOptions();
     // TODO use hash for clean tree, "dev" + hash for tree with changes, version for tagget commit

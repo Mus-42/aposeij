@@ -952,7 +952,7 @@ pub const Board = struct {
             self.pieces[@intFromEnum(piece)] |= @as(u64, 1) << square;
         }
 
-        pub fn debugPrint(self: BoardData, sink: *std.io.Writer) !void {
+        pub fn debugPrint(self: BoardData, sink: *std.Io.Writer) !void {
             for (0..8) |ri| {
                 const r = 7 - ri;
                 for (0..8) |f| {

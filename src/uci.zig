@@ -84,15 +84,17 @@ pub const UciOptions = struct {
 };
 
 pub const UciConnection = struct {
+    io: std.Io,
     stdin: *std.Io.Reader, 
     stdout: *std.Io.Writer,
-    stdout_mutex: std.Thread.Mutex = .{},
+    stdout_mutex: std.Io.Mutex = .init,
     options: UciOptions,
 
     const Self = @This();
 
-    pub fn init(stdin: *std.Io.Reader, stdout: *std.Io.Writer, opt: UciOptions) Self {
+    pub fn init(io: std.Io, stdin: *std.Io.Reader, stdout: *std.Io.Writer, opt: UciOptions) Self {
         return .{
+            .io = io,
             .stdin = stdin,
             .stdout = stdout,
             .options = opt,
@@ -243,31 +245,31 @@ pub const UciConnection = struct {
         // TODO better way to check that
         // TODO movestogo
 
-        var time_controls: search.TimeControls = .toDepth(8);
+        var time_controls: search.TimeControls = .toDepth(self.io, 8);
 
         if (args.infinite) {
-            time_controls = .infinite();
+            time_controls = .infinite(self.io);
             args.infinite = false;
         } else if (args.depth) |depth| {
-            time_controls = .toDepth(depth);
+            time_controls = .toDepth(self.io, depth);
             args.depth = null;
         } else if (args.nodes) |nodes| {
-            time_controls = .toNodes(nodes);
+            time_controls = .toNodes(self.io, nodes);
             args.nodes = null;
         } else if (args.movetime) |time| {
             const limit_ns = std.time.ns_per_ms * @as(u64, time);
-            time_controls = .toTime(limit_ns);
+            time_controls = .toTime(self.io, limit_ns);
             args.movetime = null;
         } else {
             // TODO move that to other function
             if (side_to_move == .white and args.wtime != null) {
                 const time_ns = std.time.ns_per_ms * @as(u64, args.wtime.?) / 20 + std.time.ns_per_ms * @as(u64, args.winc orelse 0) / 2;
-                time_controls = .toTime(time_ns);
+                time_controls = .toTime(self.io, time_ns);
                 args.wtime = null;
             }
             if (side_to_move == .black and args.btime != null) {
                 const time_ns = std.time.ns_per_ms * @as(u64, args.btime.?) / 20 + std.time.ns_per_ms * @as(u64, args.binc orelse 0) / 2;
-                time_controls = .toTime(time_ns);
+                time_controls = .toTime(self.io, time_ns);
                 args.btime = null;
             }
         }
@@ -290,24 +292,24 @@ pub const UciConnection = struct {
     }
 
     pub fn bestmove(self: *Self, move: Move) !void {
-        self.stdout_mutex.lock();
-        defer self.stdout_mutex.unlock();
+        try self.stdout_mutex.lock(self.io);
+        defer self.stdout_mutex.unlock(self.io);
 
         try self.stdout.print("bestmove {s}\n", .{move.algebraicNotation().toStr()});
         try self.stdout.flush();
     }
 
     pub fn readyok(self: *Self) !void {
-        self.stdout_mutex.lock();
-        defer self.stdout_mutex.unlock();
+        try self.stdout_mutex.lock(self.io);
+        defer self.stdout_mutex.unlock(self.io);
 
         try self.stdout.writeAll("readyok\n");
         try self.stdout.flush();
     }
 
     pub fn uciok(self: *Self) !void {
-        self.stdout_mutex.lock();
-        defer self.stdout_mutex.unlock();
+        try self.stdout_mutex.lock(self.io);
+        defer self.stdout_mutex.unlock(self.io);
 
         try self.stdout.writeAll(UCI_ID);
         try self.stdout.writeAll("uciok\n");
@@ -315,18 +317,18 @@ pub const UciConnection = struct {
     }
 
     pub fn searchInfo(self: *Self, info: SearchInfo) !void {
-        self.stdout_mutex.lock();
-        defer self.stdout_mutex.unlock();
+        try self.stdout_mutex.lock(self.io);
+        defer self.stdout_mutex.unlock(self.io);
         try self.writeSearchInfo(info);
         try self.stdout.flush();
     }
 
-    pub fn lockStdout(self: *Self) void {
-        self.stdout_mutex.lock();
+    pub fn lockStdout(self: *Self) !void {
+        try self.stdout_mutex.lock(self.io);
     }
 
     pub fn unlockStdout(self: *Self) void {
-        self.stdout_mutex.unlock();
+        self.stdout_mutex.unlock(self.io);
     }
 
     fn writeSearchInfo(self: *Self, info: SearchInfo) !void {
@@ -342,9 +344,9 @@ pub const UciConnection = struct {
             // std.debug.assert(is_winning == (mate_ply % 2 == 1));
             const sign: u8 = if (is_winning) '+' else '-';
             var buf: [8]u8 = undefined;
-            var stream = std.Io.fixedBufferStream(&buf);
-            try stream.writer().print("{c}{d}", .{sign, mate_dist});
-            const mate_string = buf[0..stream.pos];
+            var writer = std.Io.Writer.fixed(&buf);
+            try writer.print("{c}{d}", .{sign, mate_dist});
+            const mate_string = writer.buffer[0..writer.end];
             try self.stdout.print("score mate {s:6}", .{mate_string});
             // try self.stdout.print("score mate {d:6}", .{mate_ply});
         } else {

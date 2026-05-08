@@ -58,33 +58,35 @@ pub const NodeType = enum {
 };
 
 pub const TimeControls = struct {
+    io: std.Io,
     available_time_ns: u64 = MAX_THINKING_TIME_NS,
     depth_limit: u32 = MAX_PLY,
     nodes_limit: u64 = std.math.maxInt(u64),
-    search_start: std.time.Instant = undefined,
+    search_start: std.Io.Timestamp = undefined,
     is_exiting_search: std.atomic.Value(bool) = .init(false),
 
     const Self = @This();
 
-    pub fn toDepth(target: u32) Self {
-        return .{ .depth_limit = target };
+    pub fn toDepth(io: std.Io, target: u32) Self {
+        return .{ .io = io, .depth_limit = target };
     }
 
-    pub fn toNodes(target: u64) Self {
-        return .{ .nodes_limit = target };
+    pub fn toNodes(io: std.Io, target: u64) Self {
+        return .{ .io = io, .nodes_limit = target };
     }
 
-    pub fn infinite() Self {
-        return .{};
+    pub fn infinite(io: std.Io) Self {
+        return .{ .io = io };
     }
 
-    pub fn toTime(limit_ns: u64) Self { 
-        return .{ .available_time_ns = limit_ns };
+    pub fn toTime(io: std.Io, limit_ns: u64) Self { 
+        return .{ .io = io, .available_time_ns = limit_ns };
     }
 
     pub fn startSearch(self: *Self) void {
         self.is_exiting_search.store(false, .unordered);
-        self.search_start = std.time.Instant.now() catch unreachable;
+        // TODO std.Io.Timestamp.now(io, .awake);
+        self.search_start = std.Io.Timestamp.now(self.io, .awake);
     }
 
     pub fn isStopSet(self: *Self) bool {
@@ -100,8 +102,8 @@ pub const TimeControls = struct {
         }
         const total_nodes = nodes + qnodes;
         if (total_nodes & 0x3FF == 0x3FF) {
-            const now = std.time.Instant.now() catch unreachable;
-            if (self.available_time_ns -| now.since(self.search_start) <= TIME_EPS_NS) {
+            const passed = self.search_start.untilNow(self.io, .awake);
+            if (self.available_time_ns -| passed.nanoseconds <= TIME_EPS_NS) {
                 self.is_exiting_search.store(true, .unordered);
                 return true;
             }
@@ -201,6 +203,7 @@ const PVMoves = struct {
 
 pub const SearchThread = struct {
     alloc: Alloc,
+    io: std.Io,
     brd: *Board = undefined,
     tt: tt.TTable,
     per_ply: *[MAX_PLY]PerPly,
@@ -218,7 +221,7 @@ pub const SearchThread = struct {
 
     const Self = @This();
 
-    pub fn init(alloc: Alloc) !Self {
+    pub fn init(alloc: Alloc, io: std.Io) !Self {
         const pv = try PVMoves.init(alloc);
         const history = try alloc.create(hist.History);
         const per_ply = try alloc.create([MAX_PLY]PerPly);
@@ -226,11 +229,12 @@ pub const SearchThread = struct {
 
         return .{
             .alloc = alloc,
+            .io = io,
             .tt = ttable,
             .pv = pv,
             .per_ply = per_ply,
             .history = history,
-            .time_controls = .{},
+            .time_controls = .{ .io = io },
         };
     }
 
@@ -407,7 +411,7 @@ pub const SearchThread = struct {
             //     continue;
             // }
 
-            std.debug.assert(move.is_capture);
+            // std.debug.assert(move.is_capture);
             const move_eval = -self.qsearch(node_type, -beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
@@ -436,6 +440,7 @@ pub const SearchThread = struct {
             }
         }
 
+        // TODO commenting this out gives -2 elo
         // No legal moves
         // TODO smarter condition
         // TODO that doesn't work becasue we skipping quiet moves in qsearch
@@ -445,7 +450,6 @@ pub const SearchThread = struct {
             }
             return eval;
         }
-
         
         self.tt.put(zobrist_key, ply, QS_TT_DEPTH, eval, tt_bound, best_move);
 
@@ -720,12 +724,12 @@ pub const SearchThread = struct {
 
             self.preSearchCleanup();
 
-            const search_iteration_beg = std.time.Instant.now() catch unreachable;
+            const search_iteration_beg = std.Io.Timestamp.now(self.io, .awake);
             const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             self.pv.updateRootPv();
-            const search_iteration_end = std.time.Instant.now() catch unreachable;
-            const iteration_time = search_iteration_end.since(search_iteration_beg);
-            const search_time = search_iteration_end.since(self.time_controls.search_start);
+            const search_iteration_end = std.Io.Timestamp.now(self.io, .awake);
+            const iteration_time = search_iteration_beg.durationTo(search_iteration_end);
+            const search_time = self.time_controls.search_start.durationTo(search_iteration_end);
 
             const pv_move = self.pv.perPlyRaw(0)[0];
             if (pv_move != Move.NULL) {
@@ -733,9 +737,9 @@ pub const SearchThread = struct {
 
                 const info: uci.SearchInfo = .{
                     .depth = d,
-                    .time_ms = search_time / std.time.ns_per_ms,
+                    .time_ms = @intCast(@as(u96, @intCast(search_time.nanoseconds)) / std.time.ns_per_ms),
                     .nodes = self.nodes,
-                    .nps =  @as(u64, @intCast(@as(u96, self.nodes) * std.time.ns_per_s / @max(iteration_time, 1))),
+                    .nps =  @as(u64, @intCast(@as(u96, self.nodes) * std.time.ns_per_s / @max(iteration_time.nanoseconds, 1))),
                     .pv = self.pv.perPly(0),
                     .score = score,
                 };
@@ -793,6 +797,7 @@ fn trimInvalidPvMoves(moves: []const Move) []const Move {
 
 pub const SearchControl = struct {
     alloc: Alloc,
+    io: std.Io,
     // TODO for adding real multithreading turn that into array
     // and do something smart about synchronization
     search_thread_thread: std.Thread,
@@ -805,30 +810,31 @@ pub const SearchControl = struct {
     is_searching: bool,
     is_exiting: bool,
 
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
-    search_end_cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    cond: std.Io.Condition,
+    search_end_cond: std.Io.Condition,
 
     waiting: std.atomic.Value(u32),
 
     const Self = @This();
 
-    pub fn init(alloc: Alloc, uci_connection: *uci.UciConnection) !*Self {
+    pub fn init(alloc: Alloc, io: std.Io, uci_connection: *uci.UciConnection) !*Self {
         const self = try alloc.create(Self);
         errdefer alloc.destroy(self);
 
+        self.io = io;
         self.alloc = alloc;
         self.movegen = try board.Movegen.init(alloc);
         errdefer self.movegen.deinit(alloc);
         errdefer alloc.destroy(self.movegen);
-        self.mutex = .{};
+        self.mutex = .init;
         self.brd = try .init(alloc, self.movegen);
         errdefer self.brd.deinit();
         self.is_searching = false;
         self.is_exiting = false;
-        self.cond = .{};
-        self.search_end_cond = .{};
-        self.search_thread = try SearchThread.init(alloc);
+        self.cond = .init;
+        self.search_end_cond = .init;
+        self.search_thread = try SearchThread.init(alloc, io);
         self.waiting = .init(0);
         self.uci_connection = uci_connection;
         self.search_thread_thread = try std.Thread.spawn(.{ .allocator = alloc }, searchThreadEntry, .{ self, &self.search_thread });
@@ -836,11 +842,11 @@ pub const SearchControl = struct {
         return self;
     }
 
-    pub fn deinit(self: *Self) void {
-        self.mutex.lock();
+    pub fn deinit(self: *Self) !void {
+        try self.mutex.lock(self.io);
         self.is_exiting = true;
-        self.mutex.unlock();
-        self.cond.broadcast();
+        self.mutex.unlock(self.io);
+        self.cond.broadcast(self.io);
         self.search_thread_thread.join();
         self.search_thread.deinit();
         self.brd.deinit();
@@ -850,13 +856,13 @@ pub const SearchControl = struct {
 
     pub fn startSearch(self: *Self, time_controls: TimeControls) !void {
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
 
             // TODO copy board into each thread
             self.search_thread.time_controls = time_controls;
         }
-        self.cond.broadcast();
+        self.cond.broadcast(self.io);
     }
 
     pub fn signalStopSearch(self: *Self) !void {
@@ -864,39 +870,39 @@ pub const SearchControl = struct {
     }
     
     pub fn waitUntilSearchEnded(self: *Self) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
         
         while (self.is_searching) {
-            self.search_end_cond.wait(&self.mutex);
+            try self.search_end_cond.wait(self.io, &self.mutex);
         }
     }
 
-    fn searchThreadEntry(control: *Self, search_thread: *SearchThread) !void {
-        control.mutex.lock();
-        defer control.mutex.unlock();
+    fn searchThreadEntry(self: *Self, search_thread: *SearchThread) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         while (true) {
-            _ = control.waiting.fetchAdd(1, .release);
-            control.cond.wait(&control.mutex);
-            _ = control.waiting.fetchSub(1, .release);
+            _ = self.waiting.fetchAdd(1, .release);
+            try self.cond.wait(self.io, &self.mutex);
+            _ = self.waiting.fetchSub(1, .release);
 
-            if (control.is_exiting) {
+            if (self.is_exiting) {
                 break;
             }
-            control.is_searching = true;
+            self.is_searching = true;
             
             {
-                control.mutex.unlock();
-                defer control.mutex.lock();
+                self.mutex.unlock(self.io);
 
                 // TODO run figure out propper way to run that in multiple threads
-                try search_thread.bestMove(&control.brd, control.uci_connection);
+                try search_thread.bestMove(&self.brd, self.uci_connection);
+                try self.mutex.lock(self.io);
             }
 
             // TODO this would work only for single thread...
-            control.is_searching = false;
-            control.search_end_cond.broadcast();
+            self.is_searching = false;
+            self.search_end_cond.broadcast(self.io);
         }
     }
 };
