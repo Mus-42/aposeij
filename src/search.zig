@@ -225,12 +225,7 @@ pub const SearchThread = struct {
     }
 
     fn evalPosition(self: *Self) i16 {
-        const white_score = evaluation.whiteEval(self.brd.data);
-        if (self.brd.data.side_to_move == .white) {
-            return white_score;
-        } else {
-            return -white_score;
-        }
+        return evaluation.eval(self.brd.data);
     }
 
     fn preSearchCleanup(self: *Self) void {

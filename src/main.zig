@@ -237,6 +237,7 @@ fn run_testsuite(alloc: Alloc, io: std.Io, brd: *board.Board, filename: []const 
     defer search_thread.deinit();
 
     const movegen = try board.Movegen.init(alloc);
+    defer movegen.deinit(alloc);
     defer alloc.destroy(movegen);
 
     while (true) {
@@ -269,7 +270,7 @@ fn run_testsuite(alloc: Alloc, io: std.Io, brd: *board.Board, filename: []const 
             const mate_in = search_thread.searchToMate(brd) catch |err| {
                 switch (err) {
                     error.TimeExpired => {
-                        try output.print("failed by time mate in x for fen {s}\n", .{fen});
+                        try output.print("failed by time mate in {} for fen {s}\n", .{expected_moves, fen});
                         try output.flush();
                         total += 1;
                         continue;
@@ -279,11 +280,11 @@ fn run_testsuite(alloc: Alloc, io: std.Io, brd: *board.Board, filename: []const 
 
 
             if (expected_moves == mate_in) {
-                try output.print("passed mate in x for fen {s}\n", .{fen});
+                try output.print("passed mate in {} for fen {s}\n", .{expected_moves, fen});
                 try output.flush();
                 passed += 1;
             } else {
-                try output.print("failed mate in x for fen {s}. expected mate in {}, found in {}\n", .{fen, expected_moves, mate_in});
+                try output.print("failed mate in {} for fen {s}. expected mate in {}, found in {}\n", .{expected_moves, fen, expected_moves, mate_in});
                 try output.flush();
             }
             total += 1;

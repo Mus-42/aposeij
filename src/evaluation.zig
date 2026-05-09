@@ -191,7 +191,7 @@ pub fn whiteEval(bd: Board.BoardData) i16 {
 }
 
 pub fn eval(bd: Board.BoardData) i16 {
-    const white_score = eval(bd);
+    const white_score = whiteEval(bd);
     if (bd.side_to_move == .white) {
         return white_score;
     } else {
