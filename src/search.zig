@@ -515,8 +515,12 @@ pub const SearchThread = struct {
 
             // NMP
             if (allow_null and @abs(beta) < SCORE_MATE_ABS and remaining_depth > 1 and ply > 0) {
-                if (!self.brd.makeNullMove()) {
-                    const depth_reduction = @min(1 + remaining_depth/2, 4);
+                const pieces = &self.brd.data.pieces;
+                const is_pawns_only = (pieces[1] | pieces[2] | pieces[3] | pieces[4] | pieces[7] | pieces[8] | pieces[9] | pieces[10]) == 0;
+                if (!is_pawns_only and !self.brd.makeNullMove()) {
+                    // TODO eval-based reduction
+                    // const depth_reduction = @min(1 + remaining_depth/2, 4);
+                    const depth_reduction = (11 + remaining_depth * 5) / 8;
                     const nm_score = -self.search(.NonPv, -beta, -beta + 1, remaining_depth - depth_reduction, ply+1, extensions_used, false);
                     self.brd.unmakeNullMove();
                     if (self.time_controls.isStopSet()) {
@@ -528,7 +532,7 @@ pub const SearchThread = struct {
                         // TODO more conditions on NMP / double -> enable verification
                         // const nm_score_verif = self.search(.NonPv, beta - 1, beta, remaining_depth - depth_reduction, ply, extensions_used, false);
                         // if (nm_score_verif >= beta) {
-                        //     return nm_score;
+                        //     return nm_score_verif;
                         // }
                     }
                 }
@@ -577,26 +581,42 @@ pub const SearchThread = struct {
             }
             search_ext = @min(search_ext + extensions_used, MAX_EXTENSIONS) - extensions_used;
  
+            const search_depth = remaining_depth - 1 + search_ext;
+
             // TODO fix move ordering and implement actual LMR
             var reduction: u32 = 0;
-            if (legal_moves > 4 and remaining_depth > 1 and !in_check and score < 0) {
-                reduction = 1;
-                if (!is_pv_node and remaining_depth > 2 and legal_moves > 8) {
-                    if (tt_move.is_capture) {
-                        reduction += 1;
+            if (legal_moves > 2 and remaining_depth > 1 and score < MOVESCORE_KILLER) {
+                reduction = @intFromFloat(7.2 + @log(@as(f32, @floatFromInt(remaining_depth))) * @log(@as(f32, @floatFromInt(legal_moves))) * 2.5);
+
+                if (is_pv_node) {
+                    reduction -|= 5;
+                }
+
+                if (!is_pv_node and tt_move.is_capture) {
+                    reduction += 3;
+                }
+
+                if (in_check or new_in_check) {
+                    reduction -|= 5;
+
+                    if (in_check and new_in_check) {
+                        reduction -|= 2;
                     }
                 }
+
+                reduction /= 8;
+                reduction = @min(reduction, search_depth-|1);
             }
 
             // PVS
             var move_eval: i16 = -SCORE_INFINITY;
             if (remaining_depth < 2 or legal_moves < 3) {
-                move_eval = -self.search(node_type, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext, false);
+                move_eval = -self.search(node_type, -beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
             } else {
                 // TODO remove seach extensions from heare when moveordering is better
-                move_eval = -self.search(.NonPv, -(alpha+1), -alpha, remaining_depth - 1 - reduction + search_ext, ply + 1, extensions_used + search_ext, true);
+                move_eval = -self.search(.NonPv, -(alpha+1), -alpha, search_depth - reduction, ply + 1, extensions_used + search_ext, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
-                    move_eval = -self.search(.Pv, -beta, -alpha, remaining_depth - 1 + search_ext, ply + 1, extensions_used + search_ext, false);
+                    move_eval = -self.search(.Pv, -beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
                 }
             }
 

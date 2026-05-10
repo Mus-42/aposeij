@@ -261,15 +261,16 @@ pub const UciConnection = struct {
             time_controls = .toTime(self.io, limit_ns);
             args.movetime = null;
         } else {
+            const TIME_EXTRA_NS = 5000;
             // TODO move that to other function
             if (side_to_move == .white and args.wtime != null) {
                 const time_ns = std.time.ns_per_ms * @as(u64, args.wtime.?) / 20 + std.time.ns_per_ms * @as(u64, args.winc orelse 0) / 2;
-                time_controls = .toTime(self.io, time_ns);
+                time_controls = .toTime(self.io, time_ns -| TIME_EXTRA_NS);
                 args.wtime = null;
             }
             if (side_to_move == .black and args.btime != null) {
                 const time_ns = std.time.ns_per_ms * @as(u64, args.btime.?) / 20 + std.time.ns_per_ms * @as(u64, args.binc orelse 0) / 2;
-                time_controls = .toTime(self.io, time_ns);
+                time_controls = .toTime(self.io, time_ns -| TIME_EXTRA_NS);
                 args.btime = null;
             }
         }

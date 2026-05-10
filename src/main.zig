@@ -110,18 +110,42 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-// TODO more fens for bench
-// TODO sane way to choose those (for now just random)
-const BENCH_FENS: []const []const u8 = &.{
-    "r1bqk1nr/pp1n1pbp/2p1p1p1/8/4N3/3P1N2/PPP1BPPP/1RBQK2R w Kkq - 2 8",
-    "r3r1k1/pp1qnp1p/3bb3/4pp2/1P2P3/PB2BN1P/5PP1/R2Q1RK1 w - - 0 20",
-    "r1bq1rk1/ppp2ppp/2nb1n2/3Pp3/2B1P3/P1N2N2/1P3PPP/R1BQK2R b KQ - 0 10",
-    "r2q1rk1/1pp1bpp1/p3p2p/3pP3/3PB3/P5PP/1PP1P3/R1BQ1RK1 b - - 0 13",
-    "6k1/8/8/3n4/5R2/8/8/6K1 w - - 25 95",
-    "4r3/1p2rk2/1n2p3/1P2R3/2p3P1/5N2/5PP1/4R1K1 b - - 0 47",
-    "r2qr1k1/1ppb1p2/4p2p/1Pn1P1p1/2B5/P1Q2N1P/5PP1/3RR1K1 w - - 3 26",
-    "r1bqkb1r/ppp1pppp/2np4/3nP3/2PP4/5N2/PP3PPP/RNBQKB1R b KQkq - 0 5",
-};
+const BENCH_FENS =
+    \\ rn1qkbnr/ppp2ppp/4p3/3pPb2/3P1P2/8/PPP3PP/RNBQKBNR b KQkq - 0 4
+    \\ rn1qkb1r/ppp2ppp/4pn2/3p3b/2PP4/2N2N1P/PP2PPP1/R1BQKB1R w KQkq - 1 6
+    \\ rnb1kbnr/pppp1ppp/5q2/8/3Q4/2N5/PPP1PPPP/R1B1KBNR w KQkq - 1 4
+    \\ rn1qkbnr/pp2pppp/3p4/2p5/3PP1b1/2P2N2/PP3PPP/RNBQKB1R b KQkq - 0 4
+    \\ rnbqkb1r/ppp2ppp/5n2/3ppP2/4P3/3P4/PPP3PP/RNBQKBNR w KQkq - 0 5
+    \\ rnbqkbnr/ppp3pp/4pp2/3p4/3P1B2/3BP3/PPP2PPP/RN1QK1NR b KQkq - 1 4
+    \\ rnbqkb1r/ppp3pp/4pn2/3p1p2/2PP1B2/4PN2/PP3PPP/RN1QKB1R b KQkq - 0 5
+    \\ rnbqkb1r/pppp1ppp/4pn2/8/8/3B1N2/PPPP1PPP/RNBQ1RK1 w kq - 0 5
+    \\ r1bqkb1r/pppp1ppp/2n5/4P3/6n1/4PN2/PPP2PPP/RNBQKB1R w KQkq - 1 5
+    \\ r1bqk1nr/ppp1bppp/3p4/8/3QP3/2N1B3/PPP2PPP/R3KB1R b KQkq - 3 7
+    \\ r1bqkbnr/ppp3pp/4p3/3pP3/8/8/PPP2PPP/RNBQKB1R w KQkq - 0 7
+    \\ r1bqkb1r/ppp1pppp/2n2n2/3p4/Q2P4/2P1P3/PP3PPP/RNB1KBNR b KQkq - 0 4
+    \\ rnbqkbnr/ppp2ppp/8/3pP3/8/2P5/PP2PPPP/RNBQKBNR b KQkq - 0 3
+    \\ r1b1k2r/ppp2ppp/2n5/3qp3/1b2N3/3P1N2/PPPB1PPP/R2QK2R b KQkq - 2 8
+    \\ rn2kb1r/pp3ppp/1qp1pn2/3p1b2/2PP1B2/1QN1P3/PP3PPP/R3KBNR w KQkq - 2 7
+    \\ r1b1kb1r/ppppq1pp/2n2n2/8/5P2/5N2/PPP1P1PP/RNBQKB1R w KQkq - 0 6
+    \\ rn1qkbnr/pp2pppp/8/2pp1b2/8/5NP1/PPPPPPBP/RNBQK2R w KQkq - 2 4
+    \\ rn1qkb1r/ppp1pppp/8/3p4/3Pn1b1/4PN2/PPPN1PPP/R1BQKB1R w KQkq - 3 5
+    \\ rnbqk2r/ppp2ppp/3b1n2/3Pp3/2B5/2NP4/PPP2PPP/R1BQK1NR b KQkq - 0 5
+    \\ rnbqkbnr/pppp1p1p/4p1p1/8/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq - 1 3
+    \\ rnbqk1nr/p1pp1ppp/1p2p3/8/1b1PP3/2N5/PPP2PPP/R1BQKBNR w KQkq - 1 4
+    \\ rn1qkbnr/ppp1pppp/8/5b2/2B5/2N2Q2/PPPP1PPP/R1B1K1NR b KQkq - 5 5
+    \\ rn1qk1nr/pp1bbppp/8/1Bpp4/3P4/5N2/PPP1QPPP/RNB1K2R w KQkq - 4 7
+    \\ rnbqkbnr/ppp2ppp/8/3pp3/8/3PB3/PPP1PPPP/RN1QKBNR w KQkq - 0 3
+    \\ rn1qkb1r/pb1p1ppp/1p2pn2/2p5/3PP3/2PB1N2/PP2QPPP/RNB1K2R b KQkq - 0 6
+    \\ r1bqk2r/p4ppp/2p2n2/n1b1p1N1/8/8/PPPPBPPP/RNBQK2R w KQkq - 2 9
+    \\ r1bqk2r/pp1pnpbp/2n1p1p1/8/3NP3/2N1BP2/PPP3PP/R2QKB1R w KQkq - 1 8
+    \\ rnbqkbnr/pp2pppp/2p5/3p4/8/4PPP1/PPPP3P/RNBQKBNR b KQkq - 0 3
+    \\ rnbqkbnr/pp2p1pp/2pp1p2/8/3P4/3BPN2/PPP2PPP/RNBQK2R b KQkq - 1 4
+    \\ r1bqkbnr/ppp1pp1p/2np2p1/8/4PP2/5N2/PPPP2PP/RNBQKB1R w KQkq - 2 4
+    \\ rnbqkbnr/ppp3pp/3p1p2/4p3/4P3/3PB3/PPP2PPP/RN1QKBNR w KQkq - 0 4
+    \\ rnb1kbnr/ppp3pp/5p2/4p3/1q2P3/2N1BN2/PPP2PPP/R2QKB1R b KQkq - 3 7
+    \\
+    ;
+
 
 fn writerNoopDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
     if (data.len == 0) return 0;
@@ -150,16 +174,38 @@ fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !v
     var nodes: u64 = 0;
 
     const beg = std.Io.Timestamp.now(io, .awake);
-    for (BENCH_FENS) |fen| {
+
+    // var top_nodes: [32]u64 = @splat(0);
+    // var top_fens: [32][]const u8 = @splat("");
+
+    var iter = std.mem.splitAny(u8, BENCH_FENS, "\n");
+    while (iter.next()) |fen_raw| {
+        const fen = std.mem.trim(u8, fen_raw, &std.ascii.whitespace);
+        if (fen.len == 0) continue;
+
         const bd = board.readFen(fen) catch unreachable;
         brd.setBoardData(bd);
-    
+
         search_thread.time_controls = search_time_controls;
         try search_thread.bestMove(brd, &dummy_connection);
+
+        // for (0..32) |i| {
+        //     if (top_nodes[i] < search_thread.nodes) {
+        //         top_nodes[i] = search_thread.nodes;
+        //         top_fens[i] = fen;
+        //         break;
+        //     }
+        // }
+
         nodes += search_thread.nodes;
     }
+
+    // for (top_fens, top_nodes) |fen, fen_nodes| {
+    //     std.debug.print("{}: {s}\n", .{fen_nodes, fen});
+    // }
+
     const duration = @as(f64, @floatFromInt(beg.untilNow(io, .awake).nanoseconds)) * (1 / @as(f64, std.time.ns_per_s));
-    try output.print("{} nodes in {}s\n{} nps\n", .{nodes, duration, @as(f64, @floatFromInt(nodes)) / duration});
+    try output.print("{} nodes in {:.2}s {:.0} nps\n", .{nodes, duration, @as(f64, @floatFromInt(nodes)) / duration});
     try output.flush();
 }
 
