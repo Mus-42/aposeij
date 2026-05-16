@@ -1,9 +1,10 @@
 const std = @import("std");
-const board = @import("board");
+const board = @import("board.zig");
 const tt = @import("transposition_table.zig");
 const evaluation = @import("evaluation.zig");
 const uci = @import("uci.zig");
 const hist = @import("history.zig");
+const logs = @import("search_log.zig");
 
 const Alloc = std.mem.Allocator;
 const Move = board.Move;
@@ -34,9 +35,10 @@ pub const MOVESCORE_TT = 0x7FFF;
 pub const MOVESCORE_GOOD_CAPTURE = 0x5000;
 pub const MOVESCORE_PROMOTION = 0x5100;
 pub const MOVESCORE_KILLER = 0x5000;
-pub const MOVESCORE_BAD_CAPTURE = -0x4000;
+pub const MOVESCORE_BAD_CAPTURE = -0x5000;
 
 pub fn scoreToMateInPlyAbs(score: i16) ?u16 {
+    if (@abs(score) > SCORE_MATE_ABS) return null;
     const mate_ply = SCORE_MATE_ABS - @abs(score);
     if (mate_ply > SCORE_MATE_EPS) return null;
     return mate_ply;
@@ -47,6 +49,7 @@ pub fn plyToMoves(ply: u16) u16 {
 }
 
 pub fn scoreToMateInMovesAbs(score: i16) ?u16 {
+    if (@abs(score) > SCORE_MATE_ABS) return null;
     const mate_ply = SCORE_MATE_ABS - @abs(score);
     if (mate_ply > SCORE_MATE_EPS) return null;
     return plyToMoves(mate_ply);
@@ -193,6 +196,7 @@ pub const SearchThread = struct {
     qsearch_nodes: u64 = 0,
 
     time_controls: TimeControls,
+    logger: logs.SearchLogger,
 
     const PerPly = struct {
         killers: [2]Move,
@@ -201,10 +205,17 @@ pub const SearchThread = struct {
     const Self = @This();
 
     pub fn init(alloc: Alloc, io: std.Io) !Self {
-        const pv = try PVMoves.init(alloc);
+        var pv = try PVMoves.init(alloc);
+        errdefer pv.deinit(alloc);
         const history = try alloc.create(hist.History);
+        errdefer alloc.destroy(history);
         const per_ply = try alloc.create([MAX_PLY]PerPly);
-        const ttable = try tt.TTable.init(alloc);
+        errdefer alloc.destroy(per_ply);
+        var ttable = try tt.TTable.init(alloc);
+        errdefer ttable.deinit(alloc);
+        var logger = try logs.SearchLogger.init(io, alloc);
+        errdefer logger.deinit();
+
 
         return .{
             .alloc = alloc,
@@ -214,6 +225,7 @@ pub const SearchThread = struct {
             .per_ply = per_ply,
             .history = history,
             .time_controls = .{ .io = io },
+            .logger = logger,
         };
     }
 
@@ -222,6 +234,7 @@ pub const SearchThread = struct {
         self.pv.deinit(self.alloc);
         self.alloc.destroy(self.per_ply);
         self.alloc.destroy(self.history);
+        self.logger.deinit();
     }
 
     fn evalPosition(self: *Self) i16 {
@@ -441,6 +454,7 @@ pub const SearchThread = struct {
 
         const in_check = self.brd.data.is_in_check;
         const is_pv_node = node_type == .Pv;
+        const zobrist_key = self.brd.data.zobrist_key;
         std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
 
         self.pv.clearPly(ply);
@@ -448,6 +462,9 @@ pub const SearchThread = struct {
 
         var alpha = root_alpha;
         var beta = root_beta;
+
+        self.logger.enterNode(zobrist_key, alpha, beta, false) catch {};
+        defer self.logger.exitNode(zobrist_key) catch {};
 
         if (ply > 0) {
             alpha = @max(alpha, @as(i16, @intCast(ply)) - SCORE_MATE_ABS);
@@ -460,7 +477,6 @@ pub const SearchThread = struct {
         if (ply > 0 and (self.brd.isDraw50Moves() or self.brd.repetitionsCount() > 0))
             return 0;
 
-        const zobrist_key = self.brd.data.zobrist_key;
         var tt_move: Move = .NULL;
 
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
@@ -639,12 +655,13 @@ pub const SearchThread = struct {
 
                 const color = self.brd.data.side_to_move;
                 const bonus: i16 = @intCast(remaining_depth * remaining_depth);
+                const malus: i16 = bonus; // TODO
                 if (!best_move.is_capture) {
                     self.history.updateQuiet(color, best_move, bonus);
                     for (moves.moves()) |quiet| {
                         if (quiet == best_move) break;
                         if (quiet.is_capture) continue;
-                        self.history.updateQuiet(color, quiet, -bonus);
+                        self.history.updateQuiet(color, quiet, -malus);
                     }
                 } else {
                     self.history.updateNoisy(color, best_move, bonus);
@@ -653,7 +670,7 @@ pub const SearchThread = struct {
                 for (moves.moves()) |noisy| {
                     if (noisy == best_move) break;
                     if (!noisy.is_capture) continue;
-                    self.history.updateNoisy(color, noisy, -bonus);
+                    self.history.updateNoisy(color, noisy, -malus);
                 }
                 break;
             }
@@ -668,9 +685,6 @@ pub const SearchThread = struct {
                     tt_bound = .exact;
                 }
             }
-        }
-
-        if (best_move != Move.NULL and !best_move.is_capture and tt_bound == .lower) {
         }
 
         if (legal_moves == 0) {
@@ -698,11 +712,17 @@ pub const SearchThread = struct {
 
         var best_move: Move = .NULL;
 
+        const key = brd.data.zobrist_key;
+        var fen_buf: [board.MAX_FEN_STRING_LENGTH]u8 = undefined;
+        const fen = board.writeFen(&fen_buf, brd.data);
+
         var d: u32 = 0;
         while (true) {
             d += 1;
 
             self.preSearchCleanup();
+
+            self.logger.startNewSearch(fen, key) catch {};
 
             const search_iteration_beg = std.Io.Timestamp.now(self.io, .awake);
             const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
@@ -710,6 +730,8 @@ pub const SearchThread = struct {
             const search_iteration_end = std.Io.Timestamp.now(self.io, .awake);
             const iteration_time = search_iteration_beg.durationTo(search_iteration_end);
             const search_time = self.time_controls.search_start.durationTo(search_iteration_end);
+
+            self.logger.finishSearch() catch {};
 
             const pv_move = self.pv.perPlyRaw(0)[0];
             if (pv_move != Move.NULL) {
@@ -719,7 +741,8 @@ pub const SearchThread = struct {
                     .depth = d,
                     .time_ms = @intCast(@as(u96, @intCast(search_time.nanoseconds)) / std.time.ns_per_ms),
                     .nodes = self.nodes,
-                    .nps =  @as(u64, @intCast(@as(u96, self.nodes) * std.time.ns_per_s / @max(iteration_time.nanoseconds, 1))),
+                    .qs_nodes = self.qsearch_nodes,
+                    .nps =  @as(u64, @intCast(@as(u96, self.nodes + self.qsearch_nodes) * std.time.ns_per_s / @max(iteration_time.nanoseconds, 1))),
                     .pv = self.pv.perPly(0),
                     .score = score,
                 };

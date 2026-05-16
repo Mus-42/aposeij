@@ -1,5 +1,5 @@
 const std = @import("std");
-const board = @import("board");
+const board = @import("board.zig");
 const search = @import("search.zig");
 const evaluation = @import("evaluation.zig");
 const options = @import("options");
@@ -72,6 +72,7 @@ pub const SearchInfo = struct {
     depth: u32,
     time_ms: u64,
     nodes: u64,
+    qs_nodes: u64,
     nps: u64,
     pv: []const Move,
     score: i16,
@@ -333,9 +334,10 @@ pub const UciConnection = struct {
     }
 
     fn writeSearchInfo(self: *Self, info: SearchInfo) !void {
-        try self.stdout.print("info depth {[depth]:2} nodes {[nodes]:8} nps {[nps]:8} time {[time]:6} ", .{
+        try self.stdout.print("info depth {[depth]:2} nodes {[nodes]:8} qs_nodes {[qs_nodes]:8} nps {[nps]:8} time {[time]:6} ", .{
             .depth = info.depth,
             .nodes = info.nodes,
+            .qs_nodes = info.qs_nodes,
             .nps = info.nps,
             .time = info.time_ms,
         });

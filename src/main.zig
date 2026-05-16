@@ -1,5 +1,5 @@
 const std = @import("std");
-const board = @import("board");
+const board = @import("board.zig");
 const search = @import("search.zig");
 const evaluation = @import("evaluation.zig");
 const uci = @import("uci.zig");
@@ -10,6 +10,19 @@ const Alloc = std.mem.Allocator;
 var stdin_buf: [uci.MAX_COMMAND_LEN]u8 = undefined;
 var stdout_buf: [256]u8 = undefined;
 
+// TODO clean up this mess later
+
+var g_control: ?*search.SearchControl = null;
+var exit_requested: bool = false;
+
+fn sigint_handler(_: std.posix.SIG) callconv(.c) void {
+    if (g_control) |control| {
+        // dumm
+        control.signalStopSearch() catch {};
+        exit_requested = true;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
@@ -17,6 +30,12 @@ pub fn main(init: std.process.Init) !void {
     var stdin = std.Io.File.stdin().reader(io, &stdin_buf);
     var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
 
+    var act: std.posix.Sigaction = .{
+        .handler = .{ .handler = sigint_handler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
 
     // TODO cli option to override
     const strict_mode = std.Io.File.stdin().isTty(io) catch unreachable;
@@ -30,7 +49,11 @@ pub fn main(init: std.process.Init) !void {
         alloc.destroy(control);
     }
 
+    g_control = control;
+
     while (true) {
+        if (exit_requested) break;
+
         const command = uci_connection.readCommand() catch |err| {
             if (err == error.EndOfStream) {
                 break;
@@ -84,6 +107,7 @@ pub fn main(init: std.process.Init) !void {
                 try uci_connection.stdout.print("nodes: {}\n", .{nodes});
                 try uci_connection.stdout.print("nps: {d}\n", .{nps});
                 try uci_connection.stdout.flush();
+
             },
             .run_testsuite => {
                 var filename = std.mem.trim(u8, command.arguments, &std.ascii.whitespace);
@@ -158,6 +182,8 @@ fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !v
     var search_thread = try search.SearchThread.init(alloc, io);
     defer search_thread.deinit();
 
+    brd.clearHistory();
+
     var dummy_reader: std.Io.Reader = .failing;
     var dummy_writer: std.Io.Writer =  .{
         .vtable = &.{
@@ -186,8 +212,12 @@ fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !v
         const bd = board.readFen(fen) catch unreachable;
         brd.setBoardData(bd);
 
+        search_thread.nodes = 0;
+
         search_thread.time_controls = search_time_controls;
         try search_thread.bestMove(brd, &dummy_connection);
+
+        std.debug.print("`{s}`: {}\n", .{fen, search_thread.nodes});
 
         // for (0..32) |i| {
         //     if (top_nodes[i] < search_thread.nodes) {
@@ -197,7 +227,9 @@ fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !v
         //     }
         // }
 
+        // TODO accumulate nodes from each iterative deepening iteration, not only from the last one
         nodes += search_thread.nodes;
+        nodes += search_thread.qsearch_nodes;
     }
 
     // for (top_fens, top_nodes) |fen, fen_nodes| {

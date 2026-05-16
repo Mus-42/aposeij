@@ -1,5 +1,5 @@
 const std = @import("std");
-const board = @import("board");
+const board = @import("board.zig");
 const search = @import("search.zig");
 
 const Alloc = std.mem.Allocator;
