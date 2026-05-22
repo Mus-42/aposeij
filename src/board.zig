@@ -721,7 +721,7 @@ pub const Movegen = struct {
         // castle
         if (kind == .w_king and from == 4 and (to == 2 or to == 6)) {
             @branchHint(.unlikely);
-            const extra: Move.QuietSpetial = if (to == 2) .queen_castle else .king_castle;
+            const extra: Move.QuietSpecial = if (to == 2) .queen_castle else .king_castle;
             movelist.add(.{
                 .from = from,
                 .to = to,
@@ -1437,13 +1437,13 @@ const zobrist_hash = struct {
 
 
 pub const Move = packed struct (u16) {
-    const QuietSpetial = enum(u2) {
+    const QuietSpecial = enum(u2) {
         none,
         king_castle,
         queen_castle,
     };
 
-    const CaptureSpetial = enum(u2) {
+    const CaptureSpecial = enum(u2) {
         none,
         ep_capture,
     };
@@ -1462,8 +1462,8 @@ pub const Move = packed struct (u16) {
     };
 
     const MoveExtra = packed union {
-        quiet: QuietSpetial,
-        capture: CaptureSpetial,
+        quiet: QuietSpecial,
+        capture: CaptureSpecial,
         promotion: PromotionTarget,
     };
 
@@ -1520,17 +1520,22 @@ pub const Move = packed struct (u16) {
 pub const MAX_MOVES = 220;
 
 pub const MoveList = struct {
-    p: [MAX_MOVES]Move = undefined,
     i: usize = 0,
+    c: usize = 0,
+    p: [MAX_MOVES]Move = undefined,
+    s: [MAX_MOVES]i16 = undefined,
 
     const Self = @This();
 
-    pub fn clear(self: *Self) void {
-        self.i = 0;
-    }
-
     pub fn count(self: *const Self) usize {
         return self.i;
+    }
+
+    pub fn clear(self: *Self) void {
+        self.c = 0;
+        self.i = 0;
+        self.p = undefined;
+        self.s = undefined;
     }
 
     pub fn add(self: *Self, move: Move) void {
@@ -1538,8 +1543,29 @@ pub const MoveList = struct {
         self.i += 1;
     }
 
+    pub fn scores(self: *Self) []i16 {
+        return self.s[0..self.i];
+    }
+
     pub fn moves(self: *Self) []Move {
         return self.p[0..self.i];
+    }
+
+    pub fn movesPlayed(self: *Self) []Move {
+        return self.p[0..self.c];
+    }
+
+    pub fn pickNext(self: *Self) struct { Move, i16 } {
+        std.debug.assert(self.c < self.i);
+        const idx = std.mem.findMax(i16, self.s[self.c..self.i]);
+        if (idx > 0) {
+            std.mem.swap(Move, &self.p[self.c], &self.p[self.c+idx]);
+            std.mem.swap(i16, &self.s[self.c], &self.s[self.c+idx]);
+        }
+        const move = self.p[self.c];
+        const score = self.s[self.c];
+        self.c += 1;
+        return .{ move, score };
     }
 
     pub fn filterCapturesOnly(self: *Self) void {

@@ -200,6 +200,7 @@ pub const SearchThread = struct {
 
     const PerPly = struct {
         killers: [2]Move,
+        moves: board.MoveList,
     };
 
     const Self = @This();
@@ -274,27 +275,10 @@ pub const SearchThread = struct {
         return @min(@max(move_history, MOVESCORE_BAD_CAPTURE), MOVESCORE_KILLER);
     }
 
-    fn orderMoves(self: *Self, moves: []Move, scores: []i16, ply: u32, tt_move: Move) void {
-        const Context = struct {
-            bot: *Self,
-            moves: []Move,
-            scores: []i16,
-
-            pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-                return ctx.scores[a] > ctx.scores[b];
-            }
-
-            pub fn swap(ctx: @This(), a: usize, b: usize) void {
-                std.mem.swap(Move, &ctx.moves[a], &ctx.moves[b]);
-                std.mem.swap(i16, &ctx.scores[a], &ctx.scores[b]);
-            }
-        };
-
-        for (0..moves.len) |i| {
-            scores[i] = self.scoreMove(moves[i], ply, tt_move);
+    fn scoreMoves(self: *Self, moves: *board.MoveList, ply: u32, tt_move: Move) void {
+        for (moves.moves(), moves.scores()) |*m, *s| {
+            s.* = self.scoreMove(m.*, ply, tt_move);
         }
-        std.mem.sortUnstableContext(0, moves.len, Context { .bot = self, .moves = moves, .scores = scores });
-        // std.sort.insertionContext(0, moves.len, Context { .bot = self, .moves = moves, .scores = scores });
     }
 
     fn qsearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, root_beta: i16, ply: u32) i16 {
@@ -361,23 +345,21 @@ pub const SearchThread = struct {
             alpha = eval;
         }
 
-        var moves = board.MoveList{};
-        self.brd.movegen.genMoves(&self.brd.data, &moves);
+        const moves = &self.per_ply[ply].moves;
+        moves.clear();
+        self.brd.movegen.genMoves(&self.brd.data, moves);
     
         moves.filterCapturesOnly();
-
-        const moves_len = moves.count();
-        
-        var scores_buf: [board.MAX_MOVES]i16 = undefined;
-        const scores = scores_buf[0..moves_len];
-        self.orderMoves(moves.moves(), scores, ply, tt_move);
+        self.scoreMoves(moves, ply, tt_move);
 
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
         var tt_bound: tt.Bound = .upper;
         var moves_played: u32 = 0;
 
-        for (moves.moves()) |move| {
+        for (0..moves.count()) |_| {
+            const move, const score = moves.pickNext();
+            _ = score;
             // TODO lower that when SEE move ordering is implemented
             // (for now fails SPRT)
             if (!in_check and moves_played >= 4)
@@ -521,7 +503,7 @@ pub const SearchThread = struct {
             // RFP
             if (@abs(alpha) < 2000) {
                 const margin = @as(i16, @intCast(150 * remaining_depth));
-                if (static_eval >= beta + margin ) {
+                if (static_eval >= beta + margin) {
                     return static_eval;
                 }
                 if (static_eval - margin > alpha) {
@@ -555,9 +537,9 @@ pub const SearchThread = struct {
             }
         }
 
-
-        var moves = board.MoveList{};
-        self.brd.movegen.genMoves(&self.brd.data, &moves);
+        const moves = &self.per_ply[ply].moves;
+        moves.clear();
+        self.brd.movegen.genMoves(&self.brd.data, moves);
 
         const moves_len = moves.count();
 
@@ -568,9 +550,7 @@ pub const SearchThread = struct {
             return 0;
         }
 
-        var scores_buf: [board.MAX_MOVES]i16 = undefined;
-        const scores = scores_buf[0..moves_len];
-        self.orderMoves(moves.moves(), scores, ply, tt_move);
+        self.scoreMoves(moves, ply, tt_move);
 
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
@@ -578,7 +558,8 @@ pub const SearchThread = struct {
 
         var legal_moves: u32 = 0;
 
-        for (moves.moves(), scores) |move, score| {
+        for (0..moves.count()) |_| {
+            const move, const score = moves.pickNext();
             if (self.brd.makeMove(move))
                 continue;
             legal_moves += 1;

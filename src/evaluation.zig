@@ -17,7 +17,7 @@ pub const PIECE_COST = [6][2]i16{
 
 const GAME_PHASE_INCREMENT: [12]i16 = .{ 0, 2, 3, 5, 9, 0, 0, 2, 3, 5, 9, 0 };
 const GAME_PHASE_MAX: i16 = (2 + 3 + 5 + 9) * 4;
-const GAME_PHASE_ENDGAME_LIM: i16 = GAME_PHASE_MAX * 3 / 4;
+const GAME_PHASE_ENDGAME_LIM: i16 = 64;//GAME_PHASE_MAX * 5 / 7;
 
 const PER_SQUARE_BONUS: [6][2][64]i16 = .{
     .{
@@ -170,6 +170,27 @@ const BONUS_TABLES: [12][64][2]i16 = blk: {
 
     break :blk bonus;
 };
+
+// const BONUS_TABLES_BYTEWISE: [12][8][256][2]i16 = blk: {
+//     @setEvalBranchQuota(1000000);
+//
+//     var bonus: [12][8][256][2]i16 = @splat(@splat(@splat(@splat(0))));
+//
+//     for (0..12) |p| {
+//         for (0..8) |s| {
+//             for (0..256) |b| {
+//                 var w = b;
+//                 while (w != 0) : (w &= w - 1) {
+//                     const i = s << 3 | @ctz(w);
+//                     bonus[p][s][b][0] += BONUS_TABLES[p][i][0];
+//                     bonus[p][s][b][1] += BONUS_TABLES[p][i][1];
+//                 }
+//             }
+//         }
+//     }
+//
+//     break :blk bonus;
+// };
 
 pub fn whiteEval(bd: Board.BoardData) i16 {
     var score_midgame: i32 = 0;

@@ -17,6 +17,7 @@ var exit_requested: bool = false;
 
 fn sigint_handler(_: std.posix.SIG) callconv(.c) void {
     if (g_control) |control| {
+        // if (!control.is_searching) std.process.exit(0);
         // dumm
         control.signalStopSearch() catch {};
         exit_requested = true;
@@ -30,12 +31,12 @@ pub fn main(init: std.process.Init) !void {
     var stdin = std.Io.File.stdin().reader(io, &stdin_buf);
     var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
 
-    var act: std.posix.Sigaction = .{
-        .handler = .{ .handler = sigint_handler },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    // var act: std.posix.Sigaction = .{
+    //     .handler = .{ .handler = sigint_handler },
+    //     .mask = std.posix.sigemptyset(),
+    //     .flags = 0,
+    // };
+    // std.posix.sigaction(std.posix.SIG.INT, &act, null);
 
     // TODO cli option to override
     const strict_mode = std.Io.File.stdin().isTty(io) catch unreachable;
