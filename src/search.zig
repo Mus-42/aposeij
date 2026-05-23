@@ -239,12 +239,13 @@ pub const SearchThread = struct {
     }
 
     fn evalPosition(self: *Self) i16 {
-        return evaluation.eval(self.brd.data);
+        return self.brd.data.extractEval();
     }
 
     fn preSearchCleanup(self: *Self) void {
         self.nodes = 0;
         self.qsearch_nodes = 0;
+        self.tt.stats = .{};
     }
 
     fn scoreMove(self: *Self, move: Move, ply: u32, tt_move: Move) i16 {
@@ -335,8 +336,12 @@ pub const SearchThread = struct {
 
         eval = @max(alpha, eval);
         
+        // const pawn_index: u32 = if (self.brd.data.side_to_move == .white) 0 else 6;
+        // const can_promote_a_queen = self.brd.data.pieces[pawn_index] & (board.rankMask(0) | board.rankMask(7)) != 0;
         // TODO more accurate delta pruning
+        // var delta: i16 = 700;
         const delta = 1200;
+        // if (can_promote_a_queen) delta += 700;
         if (eval < alpha -| delta) {
             return alpha;
         }
@@ -729,6 +734,15 @@ pub const SearchThread = struct {
                 };
 
                 try uci_connection.searchInfo(info); 
+                // std.debug.print("tt: {any}\n", .{self.tt.stats});
+                // std.debug.print("tt h: {d:.4}\n", .{
+                //     @as(f64, @floatFromInt(self.tt.stats.hits))
+                //     / @as(f64, @floatFromInt(self.tt.stats.misses))
+                // });
+                // std.debug.print("tt c: {d:.4}\n", .{
+                //     @as(f64, @floatFromInt(self.tt.stats.collisions))
+                //     / @as(f64, @floatFromInt(self.tt.stats.misses))
+                // });
             }
 
             const is_exiting = self.time_controls.isSoftStop(d);

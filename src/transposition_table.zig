@@ -36,6 +36,12 @@ const TT_DEFAULT_SIZE_MB = 64;
 pub const TTable = struct {
     buckets: []TTBucket,
 
+    stats: struct {
+        hits: u64 = 0,
+        misses: u64 = 0,
+        collisions: u64 = 0,
+    } = .{},
+
     const Self = @This();
 
     // TODO pass size as paramether (in mb?)
@@ -53,6 +59,7 @@ pub const TTable = struct {
 
     pub fn clear(self: *Self) void {
         @memset(std.mem.sliceAsBytes(self.buckets), 0);
+        self.stats = .{};
     }
 
     pub fn deinit(self: *Self, alloc: Alloc) void {
@@ -97,14 +104,14 @@ pub const TTable = struct {
 
     fn indicies(self: *const Self, zobrist_key: u64) struct { u32, u16 } {
         // TODO pick a better one?
-        const TT_MAGICK = 0x35C25ADD731CCD89;
-        const key: u64 = (zobrist_key *% TT_MAGICK) >> 16;
-        const index: u32 = @intCast((key >> 16) % self.buckets.len);
-        const lower_key: u16 = @intCast(key & 0xFFFF);
+        const TT_MAGICK = 0xEFECAB0DD6865F75;
+        const key: u64 = zobrist_key *% TT_MAGICK;
+        const index: u32 = @intCast((key >> 32) % self.buckets.len);
+        const lower_key: u16 = @intCast((key >> 48) & 0xFFFF);
         return .{ index, lower_key };
     }
 
-    pub fn probe(self: *const Self, zobrist_key: u64, ply: u32) ?TTEntry {
+    pub fn probe(self: *Self, zobrist_key: u64, ply: u32) ?TTEntry {
         const tt_index, const lower_key = self.indicies(zobrist_key);
         const tt_bucket = &self.buckets[tt_index];
 
@@ -116,7 +123,11 @@ pub const TTable = struct {
             }
         }
 
-        if (pos >= 4) return null;
+        if (pos >= 4) {
+            self.stats.misses += 1;
+            return null;
+        }
+        self.stats.hits += 1;
         var entry = tt_bucket.entries[pos];
         entry.score = restoreScore(entry.score, ply);
         return entry;
@@ -129,6 +140,8 @@ pub const TTable = struct {
         var entry_i: usize = 4;
         inline for (0..4) |i| {
             if (tt_bucket.key_low[i] == lower_key) {
+                // if (tt_bucket.entries[i].depth > depth) return;
+                self.stats.collisions += 1;
                 entry_i = i;
                 break;
             }

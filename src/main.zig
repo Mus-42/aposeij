@@ -81,6 +81,7 @@ pub fn main(init: std.process.Init) !void {
             .ucinewgame => {
                 try control.signalStopSearch();
                 try control.waitUntilSearchEnded();
+                // control.search_thread.tt.clear();
             },
             .displaypos => {
                 try control.brd.data.debugPrint(uci_connection.stdout);
@@ -214,7 +215,6 @@ fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !v
         brd.setBoardData(bd);
 
         search_thread.nodes = 0;
-
         search_thread.time_controls = search_time_controls;
         try search_thread.bestMove(brd, &dummy_connection);
 

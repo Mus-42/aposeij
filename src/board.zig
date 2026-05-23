@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const eval = @import("evaluation.zig");
 const Alloc = std.mem.Allocator;
 
 pub const PieceKind = enum(u4) {
@@ -897,7 +898,11 @@ pub const Board = struct {
         castling_rights: CastlingRights = .{},
         side_to_move: SideToMove = .white,
         en_passant_target: ?Square = null,
+
         is_in_check: bool = false,
+        score_midgame: i16 = 0,
+        score_endgame: i16 = 0,
+        game_phase: u8 = 0,
         zobrist_key: u64 = 0,
 
         pub const EMPTY: BoardData = .{ .pieces = @splat(0) };
@@ -919,6 +924,7 @@ pub const Board = struct {
                 },
             };
             brd.recomputeZobristKey();
+            brd.recomputeScores();
             break :blk brd;
         };
 
@@ -935,20 +941,24 @@ pub const Board = struct {
             inline for (0..12) |i| {
                 if (self.pieces[i] & @as(u64, 1) << square != 0) {
                     self.pieces[i] &= ~(@as(u64, 1) << square);
-                    return @enumFromInt(i);
+                    self.zobrist_key ^= zobrist_hash.PIECE_SQUARES[i << 6 | square];
+                    self.score_midgame -= eval.BONUS_TABLES[i][square][0];
+                    self.score_endgame -= eval.BONUS_TABLES[i][square][1];
+                    self.game_phase -= eval.GAME_PHASE_INCREMENT[i];
+                    const piece: PieceKind = @enumFromInt(i);
+                    return piece;
                 }
             }
             return null;
         }
 
-        pub fn clearPieceAt(self: *BoardData, square: Square) void {
-            inline for (0..12) |i| {
-                self.pieces[i] &= ~(@as(u64, 1) << square);
-            }
-        }
-
         pub fn setPieceAt(self: *BoardData, square: Square, piece: PieceKind) void {
-            self.clearPieceAt(square);
+            const i: usize = @intFromEnum(piece);
+            std.debug.assert(self.pieces[i] & @as(u64, 1) << square == 0);
+            self.zobrist_key ^= zobrist_hash.PIECE_SQUARES[i << 6 | square];
+            self.score_midgame += eval.BONUS_TABLES[i][square][0];
+            self.score_endgame += eval.BONUS_TABLES[i][square][1];
+            self.game_phase += eval.GAME_PHASE_INCREMENT[i];
             self.pieces[@intFromEnum(piece)] |= @as(u64, 1) << square;
         }
 
@@ -966,6 +976,45 @@ pub const Board = struct {
             }
         }
 
+
+        pub fn recomputeScores(self: *BoardData) void {
+            var score_midgame: i16 = 0;
+            var score_endgame: i16 = 0;
+            var game_phase: u8 = 0;
+
+            inline for (0..12) |i| {
+                var piece = self.pieces[i];
+                while (piece != 0) : (piece &= piece - 1) {
+                    const pos = @ctz(piece);
+                    score_midgame += eval.BONUS_TABLES[i][pos][0];
+                    score_endgame += eval.BONUS_TABLES[i][pos][1];
+                    game_phase += eval.GAME_PHASE_INCREMENT[i];
+                }
+            }
+
+            self.game_phase = game_phase;
+            self.score_midgame = score_midgame;
+            self.score_endgame = score_endgame;
+        }
+
+        pub fn extractWhiteEval(self: *const BoardData) i16 {
+            var game_phase: i32 = self.game_phase;
+            game_phase = @min(game_phase, eval.GAME_PHASE_ENDGAME_LIM);
+            return @intCast(@divTrunc(
+                    self.score_midgame * game_phase +
+                    self.score_endgame * (eval.GAME_PHASE_ENDGAME_LIM - game_phase),
+                    eval.GAME_PHASE_ENDGAME_LIM));
+        }
+
+        pub fn extractEval(self: *const BoardData) i16 {
+            const white_score = self.extractWhiteEval();
+            if (self.side_to_move == .white) {
+                return white_score;
+            } else {
+                return -white_score;
+            }
+        }
+
         pub fn recomputeZobristKey(self: *BoardData) void {
             var key: u64 = 0;
 
@@ -978,7 +1027,7 @@ pub const Board = struct {
             }
 
             key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.castling_rights))];
-            
+
             if (self.side_to_move == .black) {
                 key ^= zobrist_hash.SIDE_TO_MOVE;
             }
@@ -1030,6 +1079,11 @@ pub const Board = struct {
     pub fn makeNullMove(self: *Self) bool {
         self.history.appendAssumeCapacity(.{ .data = self.data, .move = Move.NULL });
 
+        // self.data.zobrist_key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.data.castling_rights))];
+        if (self.data.en_passant_target) |square| {
+            self.data.zobrist_key ^= zobrist_hash.EP_FILE[square & 7];
+        }
+
         self.data.en_passant_target = null;
 
         // TODO pointless???
@@ -1047,14 +1101,13 @@ pub const Board = struct {
             self.data.halfmoves50 += 1;
         }
 
-
         self.data.side_to_move.flip();
         std.debug.assert(!self.movegen.is_dirty);
         self.movegen.sideFlipState();
         self.data.is_in_check = self.movegen.isKingInCheck();
-        // TODO don't compute from scratch each single time
-        self.data.recomputeZobristKey();
-        // self.data.castling_rights.updateAfterMove(move);
+
+        // self.data.zobrist_key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.data.castling_rights))];
+        self.data.zobrist_key ^= zobrist_hash.SIDE_TO_MOVE;
 
         return false;
     }
@@ -1067,7 +1120,11 @@ pub const Board = struct {
 
     pub fn makeMove(self: *Self, move: Move) bool {
         self.history.appendAssumeCapacity(.{ .data = self.data, .move = move });
-        
+
+        self.data.zobrist_key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.data.castling_rights))];
+        if (self.data.en_passant_target) |square| {
+            self.data.zobrist_key ^= zobrist_hash.EP_FILE[square & 7];
+        }
         self.data.en_passant_target = null;
 
         var reset_50_moves_clock = false;
@@ -1114,7 +1171,9 @@ pub const Board = struct {
             const is_pawn = piece == .b_pawn or piece == .w_pawn;
 
             if (is_pawn and move.isLooksLikePawn2SquareMove()) {
-                self.data.en_passant_target = @intCast((@as(u7, move.from) + @as(u7, move.to)) >> 1);
+                const target: Square = @intCast((@as(u7, move.from) + @as(u7, move.to)) >> 1);
+                self.data.zobrist_key ^= zobrist_hash.EP_FILE[target & 7];
+                self.data.en_passant_target = target;
             }
 
             reset_50_moves_clock = is_pawn or move.is_capture;
@@ -1146,8 +1205,9 @@ pub const Board = struct {
         std.debug.assert(!self.movegen.is_dirty);
         self.movegen.sideFlipState();
         self.data.is_in_check = self.movegen.isKingInCheck();
-        // TODO don't compute from scratch each single time
-        self.data.recomputeZobristKey();
+
+        self.data.zobrist_key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.data.castling_rights))];
+        self.data.zobrist_key ^= zobrist_hash.SIDE_TO_MOVE;
 
         return false;
     }
@@ -1177,6 +1237,7 @@ pub const Board = struct {
         self.clearHistory();
         self.data = bd;
         self.data.recomputeZobristKey();
+        self.data.recomputeScores();
         self.movegen.setDirty();
         self.movegen.computeState(&self.data);
         self.data.is_in_check = self.movegen.isKingInCheck();
@@ -1313,10 +1374,6 @@ pub fn readFen(s: []const u8) FenReadError!Board.BoardData {
 
     if (i != s.len) return error.InvalidFenCharacter;
 
-    // TODO
-    // board.is_in_check = board.computeIsInCheck();
-    // board.recomputeZobristKey();
-
     return board;
 }
 
@@ -1393,8 +1450,8 @@ const zobrist_hash = struct {
             var x = self.state;
 
             x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
+            x ^= x >> 7;
+            x ^= x << 17;
 
             self.state = x;
             return x;
@@ -1409,11 +1466,15 @@ const zobrist_hash = struct {
         // var rng: std.Random.DefaultPrng = .init(seed);
         var ret: [size]u64 = undefined;
         for (&ret) |*v| {
-            const a = rng.next();
-            const b = rng.next();
-            const c = rng.next();
-            v.* = a & b & c;
-            std.debug.assert(v.* != 0);
+            var ans: u64 = 0;
+            while (@popCount(ans) < 6 or @popCount(ans) > 10) {
+                const a = rng.next();
+                const b = rng.next();
+                const c = rng.next();
+                ans = a & b & c;
+            }
+            v.* = ans;
+            // std.debug.assert(v.* != 0);
         }
         
         // for (0..ret.len-1) |i| {
@@ -1425,7 +1486,7 @@ const zobrist_hash = struct {
         return ret;
     }
 
-    const SEED = 4242;
+    const SEED = 42;
     const PIECES_COUNT = 12 * 64;
     const ZOBRIST_VECTORS = generateVectors(SEED, PIECES_COUNT + 1 + 24);
 

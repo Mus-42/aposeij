@@ -15,9 +15,9 @@ pub const PIECE_COST = [6][2]i16{
     .{ 0, 0 },
 };
 
-const GAME_PHASE_INCREMENT: [12]i16 = .{ 0, 2, 3, 5, 9, 0, 0, 2, 3, 5, 9, 0 };
-const GAME_PHASE_MAX: i16 = (2 + 3 + 5 + 9) * 4;
-const GAME_PHASE_ENDGAME_LIM: i16 = 64;//GAME_PHASE_MAX * 5 / 7;
+pub const GAME_PHASE_INCREMENT: [12]u8 = .{ 0, 2, 3, 5, 9, 0, 0, 2, 3, 5, 9, 0 };
+pub const GAME_PHASE_MAX: u8 = (2 + 3 + 5 + 9) * 4;
+pub const GAME_PHASE_ENDGAME_LIM: u8 = 64;//GAME_PHASE_MAX * 5 / 7;
 
 const PER_SQUARE_BONUS: [6][2][64]i16 = .{
     .{
@@ -154,7 +154,7 @@ const PER_SQUARE_BONUS: [6][2][64]i16 = .{
     },
 };
 
-const BONUS_TABLES: [12][64][2]i16 = blk: {
+pub const BONUS_TABLES: [12][64][2]i16 = blk: {
     @setEvalBranchQuota(40000);
 
     var bonus: [12][64][2]i16 = @splat(@splat(@splat(0)));
@@ -191,34 +191,6 @@ const BONUS_TABLES: [12][64][2]i16 = blk: {
 //
 //     break :blk bonus;
 // };
-
-pub fn whiteEval(bd: Board.BoardData) i16 {
-    var score_midgame: i32 = 0;
-    var score_endgame: i32 = 0;
-    var game_phase: i32 = 0;
-
-    inline for (0..12) |i| {
-        var piece = bd.pieces[i];
-        while (piece != 0) : (piece &= piece - 1) {
-            const pos = @ctz(piece);
-            score_midgame += BONUS_TABLES[i][pos][0];
-            score_endgame += BONUS_TABLES[i][pos][1];
-            game_phase += GAME_PHASE_INCREMENT[i];
-        }
-    }
-
-    game_phase = @min(game_phase, GAME_PHASE_ENDGAME_LIM);
-    return @intCast(@divTrunc(score_midgame * game_phase + score_endgame * (GAME_PHASE_ENDGAME_LIM - game_phase), GAME_PHASE_ENDGAME_LIM));
-}
-
-pub fn eval(bd: Board.BoardData) i16 {
-    const white_score = whiteEval(bd);
-    if (bd.side_to_move == .white) {
-        return white_score;
-    } else {
-        return -white_score;
-    }
-}
 
 pub fn captureMoveMaterial(bd: Board.BoardData, move: Move) i16 {
     const from = @intFromEnum(bd.getPieceAt(move.from).?);
