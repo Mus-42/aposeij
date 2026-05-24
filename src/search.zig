@@ -253,32 +253,54 @@ pub const SearchThread = struct {
             return MOVESCORE_TT;
         }
 
-        if (move.is_promotion and move.extra.promotion == .queen) {
-            return MOVESCORE_PROMOTION;
-        }
-
         if (self.per_ply[ply].killers[0] == move or self.per_ply[ply].killers[1] == move) {
             return MOVESCORE_KILLER;
         }
 
-        if (move.is_capture) {
-            // TODO SSE
-            const material = evaluation.captureMoveMaterial(self.brd.data, move) + self.history.getNoisy(self.brd.data.side_to_move, move);
+        if (move.isNoisy()) {
+            const score = self.scoreMoveQsearch(move, tt_move);
 
-            if (material >= 0) {
-                return MOVESCORE_GOOD_CAPTURE + material;
+            if (score >= 0) {
+                return MOVESCORE_GOOD_CAPTURE + score;
             }
 
-            return MOVESCORE_BAD_CAPTURE + material;
+            return MOVESCORE_BAD_CAPTURE + score;
         }
 
         const move_history = self.history.getQuiet(self.brd.data.side_to_move, move);
         return @min(@max(move_history, MOVESCORE_BAD_CAPTURE), MOVESCORE_KILLER);
     }
 
-    fn scoreMoves(self: *Self, moves: *board.MoveList, ply: u32, tt_move: Move) void {
+    fn scoreMoveQsearch(self: *Self, move: Move, tt_move: Move) i16 {
+        if (tt_move == move) {
+            return MOVESCORE_TT;
+        }
+
+        var score: i16 = 0;
+
+        if (move.is_promotion) {
+            const piece = @intFromEnum(move.extra.promotion.toPiece(.white));
+            score += evaluation.PIECE_COST_ABS[piece][0];
+        }
+
+        if (move.is_capture) {
+            // score += self.brd.seeAfterMove(move);
+            score += evaluation.captureMoveMaterial(self.brd.data, move) ;
+        }
+
+        // TODO SSE
+        score += self.history.getNoisy(self.brd.data.side_to_move, move);
+
+        return score;
+    }
+
+    fn scoreMoves(self: *Self, comptime is_qsearch: bool, moves: *board.MoveList, ply: u32, tt_move: Move) void {
         for (moves.moves(), moves.scores()) |*m, *s| {
-            s.* = self.scoreMove(m.*, ply, tt_move);
+            if (is_qsearch) {
+                s.* = self.scoreMoveQsearch(m.*, tt_move);
+            } else {
+                s.* = self.scoreMove(m.*, ply, tt_move);
+            }
         }
     }
 
@@ -355,7 +377,7 @@ pub const SearchThread = struct {
         self.brd.movegen.genMoves(&self.brd.data, moves);
     
         moves.filterCapturesOnly();
-        self.scoreMoves(moves, ply, tt_move);
+        self.scoreMoves(true, moves, ply, tt_move);
 
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
@@ -365,8 +387,7 @@ pub const SearchThread = struct {
         for (0..moves.count()) |_| {
             const move, const score = moves.pickNext();
             _ = score;
-            // TODO lower that when SEE move ordering is implemented
-            // (for now fails SPRT)
+            //and move.is_capture and self.brd.seeAfterMove(move) < 0
             if (!in_check and moves_played >= 4)
                 break;
 
@@ -555,7 +576,7 @@ pub const SearchThread = struct {
             return 0;
         }
 
-        self.scoreMoves(moves, ply, tt_move);
+        self.scoreMoves(false, moves, ply, tt_move);
 
         // technically can be a refutation move
         var best_move: Move = Move.NULL;
@@ -594,7 +615,7 @@ pub const SearchThread = struct {
                     reduction -|= 5;
                 }
 
-                if (!is_pv_node and tt_move.is_capture) {
+                if (!is_pv_node and tt_move.isNoisy()) {
                     reduction += 3;
                 }
 
@@ -629,7 +650,7 @@ pub const SearchThread = struct {
             }
 
             if (move_eval >= beta) {
-                if (!move.is_capture and !move.is_promotion) {
+                if (!move.isNoisy()) {
                     self.addKiller(ply, move);
                 }
                 eval = move_eval;
@@ -642,11 +663,11 @@ pub const SearchThread = struct {
                 const color = self.brd.data.side_to_move;
                 const bonus: i16 = @intCast(remaining_depth * remaining_depth);
                 const malus: i16 = bonus; // TODO
-                if (!best_move.is_capture) {
+                if (!best_move.isNoisy()) {
                     self.history.updateQuiet(color, best_move, bonus);
                     for (moves.moves()) |quiet| {
                         if (quiet == best_move) break;
-                        if (quiet.is_capture) continue;
+                        if (quiet.isNoisy()) continue;
                         self.history.updateQuiet(color, quiet, -malus);
                     }
                 } else {
@@ -655,7 +676,7 @@ pub const SearchThread = struct {
 
                 for (moves.moves()) |noisy| {
                     if (noisy == best_move) break;
-                    if (!noisy.is_capture) continue;
+                    if (!noisy.isNoisy()) continue;
                     self.history.updateNoisy(color, noisy, -malus);
                 }
                 break;

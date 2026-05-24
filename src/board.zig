@@ -677,7 +677,7 @@ pub const Movegen = struct {
             var pieces = self.state.pieces[i];
             while (pieces != 0) : (pieces &= pieces - 1) {
                 const from: Square = @intCast(@ctz(pieces));
-                var to_all = self.getMovesBitboard(kind, from) & ~white;
+                var to_all = self.getMovesBitboard(kind, false, from) & ~white;
                 while (to_all != 0) : (to_all &= to_all - 1) {
                     const to: Square = @intCast(@ctz(to_all));
                     self.emitMoves(kind, from, to, movelist);
@@ -741,17 +741,29 @@ pub const Movegen = struct {
     }
         
     // white piece -> all moves, black piece -> only attacks (isAttackedBy)
-    fn getMovesBitboard(self: *const Self, comptime kind: PieceKind, pos: Square) u64 {
+    fn getMovesBitboard(self: *const Self, comptime kind: PieceKind, comptime rev_attacks: bool, pos: Square) u64 {
         const white = self.state.white;
         const black = self.state.black;
         const blockers = white | black;
 
         switch (kind) {
+            // TODO figure out hot do deal with EP capture for pawn attacks rev
             .w_pawn => {
-                const ep = if (self.state.ep_target) |target| @as(u64, 1) << target else 0;
-                return whitePawnMoves(pos, white, black, ep);
+                if (rev_attacks) {
+                    return pawnAttacksRev(.white, pos);
+                } else {
+                    const ep = if (self.state.ep_target) |target| @as(u64, 1) << target else 0;
+                    return whitePawnMoves(pos, white, black, ep);
+                }
+
             },
-            .b_pawn => return blackPawnAttacksRev(pos),
+            .b_pawn => {
+                if (rev_attacks) {
+                    return pawnAttacksRev(.black, pos);
+                } else {
+                    unreachable;
+                }
+            },
             .w_knight, .b_knight => return LOOKUPS.knight_moves[pos],
             .w_bishop, .b_bishop => {
                 const actual_blockers = LOOKUPS.bishop_blockers_mask[pos] & blockers;
@@ -769,11 +781,16 @@ pub const Movegen = struct {
                 const index = base_index + ((actual_blockers *% magic) >> shift);
                 return self.rook_attacks[index];
             },
-            //return rookAttacksSlow(pos, blockers),
-            .w_queen, .b_queen => return self.getMovesBitboard(.w_bishop, pos) | self.getMovesBitboard(.w_rook, pos),
-            //return queenAttacksSlow(pos, blockers),
-            .w_king => return LOOKUPS.king_moves[pos] | self.whiteKingCastling(),
-            .b_king => return LOOKUPS.king_moves[pos],
+            .w_queen, .b_queen => {
+                return self.getMovesBitboard(.w_bishop, rev_attacks, pos) | self.getMovesBitboard(.w_rook, rev_attacks, pos);
+            },
+            .w_king, .b_king => {
+                if (rev_attacks) {
+                    return LOOKUPS.king_moves[pos];
+                } else {
+                    return LOOKUPS.king_moves[pos] | self.whiteKingCastling();
+                }
+            }
         }
     }
 
@@ -783,7 +800,7 @@ pub const Movegen = struct {
             var pos = squares;
             while (pos != 0) : (pos &= pos - 1) {
                 const piece_pos: Square = @intCast(@ctz(pos));
-                if (self.getMovesBitboard(kind, piece_pos) & self.state.pieces[i] != 0) {
+                if (self.getMovesBitboard(kind, true, piece_pos) & self.state.pieces[i] != 0) {
                     return true;
                 }
             }
@@ -976,7 +993,6 @@ pub const Board = struct {
             }
         }
 
-
         pub fn recomputeScores(self: *BoardData) void {
             var score_midgame: i16 = 0;
             var score_endgame: i16 = 0;
@@ -997,13 +1013,19 @@ pub const Board = struct {
             self.score_endgame = score_endgame;
         }
 
-        pub fn extractWhiteEval(self: *const BoardData) i16 {
+        pub fn scoreMgEgToCurrent(self: *const BoardData, mg: i16, eg: i16) i16 {
             var game_phase: i32 = self.game_phase;
             game_phase = @min(game_phase, eval.GAME_PHASE_ENDGAME_LIM);
-            return @intCast(@divTrunc(
-                    self.score_midgame * game_phase +
-                    self.score_endgame * (eval.GAME_PHASE_ENDGAME_LIM - game_phase),
-                    eval.GAME_PHASE_ENDGAME_LIM));
+            return @intCast(@divTrunc(mg * game_phase + eg * (eval.GAME_PHASE_ENDGAME_LIM - game_phase), eval.GAME_PHASE_ENDGAME_LIM));
+        }
+
+        pub fn extractWhiteEval(self: *const BoardData) i16 {
+            return self.scoreMgEgToCurrent(self.score_midgame, self.score_endgame);
+        }
+
+        pub fn currentPieceCost(self: *const BoardData, piece_kind: PieceKind) i16 {
+            const i = @intFromEnum(piece_kind);
+            return self.scoreMgEgToCurrent(eval.PIECE_COST_ABS[i][0], eval.PIECE_COST_ABS[i][1]);
         }
 
         pub fn extractEval(self: *const BoardData) i16 {
@@ -1253,6 +1275,63 @@ pub const Board = struct {
         }
         std.debug.print("\n", .{});
     }
+
+    pub fn getLeastValuableAttacker(self: *Self, side: SideToMove, square: Square) ?struct { PieceKind, u64 } {
+        switch (side) {
+            inline else => |cside| {
+                const from = if (cside == .white) 0 else 6;
+                inline for (from..from+6) |p| {
+                    const piece: PieceKind = @enumFromInt(p);
+                    const attackers = self.movegen.getMovesBitboard(piece, true, square) & self.data.pieces[p];
+                    if (attackers != 0) {
+                        return .{ piece, attackers };
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    pub fn seeAfterMove(self: *Self, move: Move) i16 {
+        const old_bd = self.data;
+        defer self.data = old_bd;
+        std.debug.assert(move.is_capture);
+
+        var target = move.to;
+        if (!move.is_promotion and move.extra.capture == .ep_capture) {
+            target ^= 8;
+        }
+
+        var gain: [32]i16 = @splat(0);
+        var attacker = self.data.popPieceAt(move.from).?;
+        var from = @as(u64, 1) << move.from;
+        const captured = self.data.popPieceAt(target).?;
+        gain[0] = eval.PIECE_COST_ABS[@intFromEnum(captured)][0];
+        var d: u32 = 1;
+        var side = self.data.side_to_move;
+        // TODO this can be optimized to piece-wise loop
+        while (true) {
+            gain[d] = eval.PIECE_COST_ABS[@intFromEnum(attacker)][0] - gain[d-1];
+            side.flip();
+            attacker, from = self.getLeastValuableAttacker(side, target) orelse break;
+            const kind = self.data.popPieceAt(@intCast(@ctz(from)));
+            std.debug.assert(kind == attacker);
+            d += 1;
+        }
+
+        // const l = d;
+        // std.debug.print("{any}\n", .{gain[0..l]});
+        
+        d -= 1;
+        while (d > 0) {
+            gain[d-1] = @min(gain[d-1], -gain[d]);
+            d -= 1;
+        }
+
+        // std.debug.print("{any}\n", .{gain[0..l]});
+
+        return gain[0];
+    }
 };
 
 pub const DEFAULT_FEN_STRING = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -1498,24 +1577,24 @@ const zobrist_hash = struct {
 
 
 pub const Move = packed struct (u16) {
-    const QuietSpecial = enum(u2) {
+    pub const QuietSpecial = enum(u2) {
         none,
         king_castle,
         queen_castle,
     };
 
-    const CaptureSpecial = enum(u2) {
+    pub const CaptureSpecial = enum(u2) {
         none,
         ep_capture,
     };
 
-    const PromotionTarget = enum(u2) {
+    pub const PromotionTarget = enum(u2) {
         knight,
         bishop,
         rook,
         queen,
 
-        fn toPiece(self: PromotionTarget, side: SideToMove) PieceKind {
+        pub fn toPiece(self: PromotionTarget, side: SideToMove) PieceKind {
             const kind = @as(u4, @intFromEnum(self)) + 1;
             const side_shift = (@as(u4, 0) -% @intFromEnum(side)) & 6;
             return @enumFromInt(kind + side_shift);
@@ -1547,6 +1626,10 @@ pub const Move = packed struct (u16) {
 
     pub const NULL: Self = @bitCast(@as(u16, 0));
     // pub const NULL: Self = .{ .from = 0, .to = 0, .is_promotion = false, .is_capture = false, .extra = .{ .quiet = .none }};
+
+    pub fn isNoisy(self: Self) bool {
+        return self.is_capture or self.is_promotion;
+    }
 
     pub fn isLooksLikePawn2SquareMove(self: Self) bool {
         const move_mask = @as(u64, 1) << self.to | @as(u64, 1) << self.from;
@@ -1666,10 +1749,10 @@ fn whitePawnMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64, ep_ta
     return moves | captures;
 }
 
-// "on which square black pawn should stand to attack this square?"
-fn blackPawnAttacksRev(piece_pos: Square) u64 {
+// "on which square pawn should stand to attack this square?"
+fn pawnAttacksRev(comptime side: SideToMove, piece_pos: Square) u64 {
     const piece = @as(u64, 1) << piece_pos;
-    const down_raw = bitboardUp(piece);
+    const down_raw = if (side == .white) bitboardDown(piece) else bitboardUp(piece);
     const captures = bitboardLeft(down_raw) | bitboardRight(down_raw);
     return captures;
 }

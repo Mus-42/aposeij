@@ -46,11 +46,31 @@ pub fn main(init: std.process.Init) !void {
 
     var control = try search.SearchControl.init(alloc, io, &uci_connection);
     defer { 
+        std.debug.print("exiting...\n", .{});
         control.deinit() catch {};
         alloc.destroy(control);
+        std.debug.print("exited...\n", .{});
     }
 
     g_control = control;
+
+    // control.brd.setBoardData(board.readFen("1k1r3q/1ppn3p/p4b2/4p3/8/P2N2P1/1PP1R1BP/2K1Q3 w - - 0 1") catch unreachable);
+    // try control.brd.data.debugPrint(uci_connection.stdout);
+    // try uci_connection.stdout.flush();
+    //
+    // const move: board.Move = .{
+    //     .is_capture = true,
+    //     .is_promotion = false,
+    //     .from = 19,
+    //     .to = 36,
+    //     .extra = .{ .capture = .none }
+    // };
+    // const see = control.brd.seeAfterMove(move);
+    // std.debug.print("see after {s} = {}\n", .{move.algebraicNotation().toStr(), see});
+    //
+    // if (1 != 2) {
+    //     return;
+    // }
 
     while (true) {
         if (exit_requested) break;

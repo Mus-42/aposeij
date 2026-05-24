@@ -6,7 +6,13 @@ const Move = board.Move;
 const PieceKind = board.PieceKind;
 const Board = board.Board;
 
-pub const PIECE_COST = [6][2]i16{
+pub const PIECE_COST_ABS = [12][2]i16{
+    .{ 85, 95 },
+    .{ 320, 290 },
+    .{ 330, 310 },
+    .{ 480, 510 },
+    .{ 1000, 950 },
+    .{ 0, 0 },
     .{ 85, 95 },
     .{ 320, 290 },
     .{ 330, 310 },
@@ -161,10 +167,10 @@ pub const BONUS_TABLES: [12][64][2]i16 = blk: {
 
     for (0..6) |piece| {
         for (0..64) |square| {
-            bonus[piece + 0][square][0] = PIECE_COST[piece][0] + PER_SQUARE_BONUS[piece][0][board.sideFlipSquare(square)];
-            bonus[piece + 0][square][1] = PIECE_COST[piece][1] + PER_SQUARE_BONUS[piece][1][board.sideFlipSquare(square)];
-            bonus[piece + 6][square][0] = - PIECE_COST[piece][0] - PER_SQUARE_BONUS[piece][0][square];
-            bonus[piece + 6][square][1] = - PIECE_COST[piece][1] - PER_SQUARE_BONUS[piece][1][square];
+            bonus[piece + 0][square][0] = PIECE_COST_ABS[piece][0] + PER_SQUARE_BONUS[piece][0][board.sideFlipSquare(square)];
+            bonus[piece + 0][square][1] = PIECE_COST_ABS[piece][1] + PER_SQUARE_BONUS[piece][1][board.sideFlipSquare(square)];
+            bonus[piece + 6][square][0] = - PIECE_COST_ABS[piece][0] - PER_SQUARE_BONUS[piece][0][square];
+            bonus[piece + 6][square][1] = - PIECE_COST_ABS[piece][1] - PER_SQUARE_BONUS[piece][1][square];
         }
     }
 
@@ -193,12 +199,12 @@ pub const BONUS_TABLES: [12][64][2]i16 = blk: {
 // };
 
 pub fn captureMoveMaterial(bd: Board.BoardData, move: Move) i16 {
-    const from = @intFromEnum(bd.getPieceAt(move.from).?);
+    const from = bd.getPieceAt(move.from).?;
     const to_square = if (!move.is_promotion and move.extra.capture == .ep_capture) move.to ^ 8 else move.to;
-    const to = @intFromEnum(bd.getPieceAt(to_square).?);
+    const to = bd.getPieceAt(to_square).?;
 
-    const cost_from = if (from < 6) PIECE_COST[from][0] else PIECE_COST[from - 6][0];
-    const cost_to =   if (to < 6) PIECE_COST[to][0] else PIECE_COST[to - 6][0];
+    const cost_from = PIECE_COST_ABS[@intFromEnum(from)][0];
+    const cost_to = PIECE_COST_ABS[@intFromEnum(to)][0];
 
     return cost_to * 6 - cost_from;
 }
