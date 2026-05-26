@@ -374,9 +374,9 @@ pub const SearchThread = struct {
 
         const moves = &self.per_ply[ply].moves;
         moves.clear();
-        self.brd.movegen.genMoves(&self.brd.data, moves);
+        self.brd.movegen.genMoves(true, &self.brd.data, moves);
     
-        moves.filterCapturesOnly();
+        // moves.filterCapturesOnly();
         self.scoreMoves(true, moves, ply, tt_move);
 
         // technically can be a refutation move
@@ -485,8 +485,11 @@ pub const SearchThread = struct {
         if (ply > 0 and (self.brd.isDraw50Moves() or self.brd.repetitionsCount() > 0))
             return 0;
 
-        var tt_move: Move = .NULL;
+        if (remaining_depth == 0 or ply >= MAX_PLY) {
+            return self.qsearch(node_type, alpha, beta, ply);
+        }
 
+        var tt_move: Move = .NULL;
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             if (!is_pv_node and tt_entry.depth >= remaining_depth and ply > 0) { 
                 if (tt_entry.bound == .exact or 
@@ -514,14 +517,6 @@ pub const SearchThread = struct {
         if (self.time_controls.isStopSet()) {
             return alpha;
         }
-
-        if (remaining_depth == 0) {
-            return static_eval;
-        }
-
-        // TODO make something about that?
-        if (ply >= MAX_PLY)
-            return static_eval;
 
         var eval: i16 = -SCORE_INFINITY;
 
@@ -565,7 +560,7 @@ pub const SearchThread = struct {
 
         const moves = &self.per_ply[ply].moves;
         moves.clear();
-        self.brd.movegen.genMoves(&self.brd.data, moves);
+        self.brd.movegen.genMoves(false, &self.brd.data, moves);
 
         const moves_len = moves.count();
 

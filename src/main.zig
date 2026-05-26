@@ -46,14 +46,14 @@ pub fn main(init: std.process.Init) !void {
 
     var control = try search.SearchControl.init(alloc, io, &uci_connection);
     defer { 
-        std.debug.print("exiting...\n", .{});
+        // TODO fix "search thread deadlocking and never exiting" bug
         control.deinit() catch {};
         alloc.destroy(control);
-        std.debug.print("exited...\n", .{});
     }
 
     g_control = control;
 
+    // TODO SEE
     // control.brd.setBoardData(board.readFen("1k1r3q/1ppn3p/p4b2/4p3/8/P2N2P1/1PP1R1BP/2K1Q3 w - - 0 1") catch unreachable);
     // try control.brd.data.debugPrint(uci_connection.stdout);
     // try uci_connection.stdout.flush();
@@ -268,7 +268,7 @@ fn perft_root(brd: *board.Board, remaining_depth: u32, output: *std.Io.Writer) !
     }
 
     var moves = board.MoveList{};
-    brd.movegen.genMoves(&brd.data, &moves);
+    brd.movegen.genMoves(false, &brd.data, &moves);
     const impl = struct {
         fn lessThan(_: void, a: board.Move, b: board.Move) bool {
             return std.mem.lessThan(u8, &a.algebraicNotation().buf, &b.algebraicNotation().buf);
@@ -296,7 +296,7 @@ fn perft(brd: *board.Board, remaining_depth: u32) u64 {
     }
 
     var moves = board.MoveList{};
-    brd.movegen.genMoves(&brd.data, &moves);
+    brd.movegen.genMoves(false, &brd.data, &moves);
 
     var nodes_count = @as(u64, 0);
     for (moves.moves()) |move| {

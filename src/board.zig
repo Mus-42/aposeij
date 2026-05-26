@@ -23,8 +23,12 @@ pub const SideToMove = enum(u1) {
     white,
     black,
 
+    pub fn opposite(self: *@This()) SideToMove {
+        return if (self.* == .white) .black else .white;
+    }
+
     pub fn flip(self: *@This()) void {
-        self.* = if (self.* == .white) .black else .white;
+        self.* = self.opposite();
     }
 };
 
@@ -151,7 +155,7 @@ pub const CastlingRights = packed struct (u4) {
 // actually less then max possible in chess but way less than you may want to rewind
 const MAX_HISTORY_LEN = 1024; 
 
-const MovegenComptimeLoopups = struct {
+const MovegenComptimeLookups = struct {
     // magic boards stuff
     bishop_blockers_mask: [64]u64,
     rook_blockers_mask: [64]u64,
@@ -166,10 +170,10 @@ const MovegenComptimeLoopups = struct {
     king_moves: [64]u64,
 };
 
-const LOOKUPS: MovegenComptimeLoopups = blk: {
+const LOOKUPS: MovegenComptimeLookups = blk: {
     @setEvalBranchQuota(50000);
 
-    var lookups: MovegenComptimeLoopups = .{
+    var lookups: MovegenComptimeLookups = .{
         .bishop_blockers_mask = undefined,
         .rook_blockers_mask = undefined,
         .rook_magic = .{
@@ -587,9 +591,6 @@ pub fn searchBitboardMagic(alloc: Alloc, is_rook: bool) !void {
 }
 
 pub const Movegen = struct {
-    state: State = .{},
-    is_dirty: bool = true,
-    
     bishop_attacks: []u64 = &.{},
     rook_attacks: []u64 = &.{},
 
@@ -647,51 +648,43 @@ pub const Movegen = struct {
         alloc.free(self.rook_attacks);
     }
 
-    pub fn setDirty(self: *Self) void {
-        self.is_dirty = true;
-    }
-
     // is side-to-move king in check?
-    pub fn isKingInCheck(self: *const Self) bool {
-        const kings = self.state.pieces[@intFromEnum(PieceKind.w_king)];
-        return self.isAnySquareUnderAttack(kings);
+    pub fn isKingInCheck(self: *const Self, bd: *const Board.BoardData) bool {
+        const piece: PieceKind = if (bd.side_to_move == .white) .w_king else .b_king;
+        const kings = bd.pieces[@intFromEnum(piece)];
+        return self.isAnySquareUnderAttack(bd, kings);
     }
 
     // TODO split into phases (like caputres / quiets ...?)
 
-    pub fn genMoves(self: *Self, board: *const Board.BoardData, movelist: *MoveList) void {
-        self.computeState(board);
-        self.acutallyGenWiteMoves(movelist);
-
-        if (board.side_to_move != .white) {
-            for (movelist.moves()) |*move| {
-                move.sideFlip();
-            }
-        }
-    }
-
-    fn acutallyGenWiteMoves(self: *const Self, movelist: *MoveList) void {
-        const white = self.state.white;
-        inline for (0..6) |i| {
-            const kind: PieceKind = @enumFromInt(i);
-            var pieces = self.state.pieces[i];
-            while (pieces != 0) : (pieces &= pieces - 1) {
-                const from: Square = @intCast(@ctz(pieces));
-                var to_all = self.getMovesBitboard(kind, false, from) & ~white;
-                while (to_all != 0) : (to_all &= to_all - 1) {
-                    const to: Square = @intCast(@ctz(to_all));
-                    self.emitMoves(kind, from, to, movelist);
+    pub fn genMoves(self: *Self, comptime is_captures_only: bool, bd: *const Board.BoardData, movelist: *MoveList) void {
+        const us = if (bd.side_to_move == .white) bd.white else bd.black;
+        const start: usize = if (bd.side_to_move == .white) 0 else 6;
+        for (start..start+6) |i| {
+            switch(@as(PieceKind, @enumFromInt(i))) {
+                inline else => |kind| {
+                    var pieces = bd.pieces[i];
+                    while (pieces != 0) : (pieces &= pieces - 1) {
+                        const from: Square = @intCast(@ctz(pieces));
+                        var to_all = self.getMovesBitboard(is_captures_only, bd, kind, false, from) & ~us;
+                        while (to_all != 0) : (to_all &= to_all - 1) {
+                            const to: Square = @intCast(@ctz(to_all));
+                            self.emitMoves(is_captures_only, bd, kind, from, to, movelist);
+                        }
+                    }
                 }
             }
         }
     }
 
-    inline fn emitMoves(self: *const Self, comptime kind: PieceKind, from: Square, to: Square, movelist: *MoveList) void {
-        const black = self.state.black;
+    inline fn emitMoves(self: *const Self, comptime is_captures_only: bool, bd: *const Board.BoardData, kind: PieceKind, from: Square, to: Square, movelist: *MoveList) void {
+        const they = if (bd.side_to_move == .white) bd.black else bd.white;
 
-        if (kind == .w_pawn) {
+        _ = self;
+
+        if (kind == .w_pawn or kind == .b_pawn) {
             // ep capture
-            if (self.state.ep_target == to) {
+            if (bd.en_passant_target == to) {
                 @branchHint(.unlikely);
                 movelist.add(.{
                     .from = from,
@@ -702,8 +695,9 @@ pub const Movegen = struct {
                 return;
             }
 
+            const rank_to = to >> 3;
             // promotion
-            if (to >> 3 == 7) {
+            if (rank_to == 0 or rank_to == 7) {
                 @branchHint(.unlikely);
                 const PROMOTION_TARGETS = [4]Move.PromotionTarget{ .knight, .bishop, .rook, .queen };
                 inline for (PROMOTION_TARGETS) |target| {
@@ -711,7 +705,7 @@ pub const Movegen = struct {
                         .from = from,
                         .to = to,
                         .is_promotion = true,
-                        .is_capture = (black >> to & 1) != 0,
+                        .is_capture = (they >> to & 1) != 0,
                         .extra = .{ .promotion = target },
                     });
                 }
@@ -719,59 +713,80 @@ pub const Movegen = struct {
             }
         }
 
-        // castle
-        if (kind == .w_king and from == 4 and (to == 2 or to == 6)) {
-            @branchHint(.unlikely);
-            const extra: Move.QuietSpecial = if (to == 2) .queen_castle else .king_castle;
-            movelist.add(.{
-                .from = from,
-                .to = to,
-                .extra = .{ .quiet = extra },
-            });
-            return;
+        if (!is_captures_only and (kind == .w_king or kind == .b_king)) {
+            const file_from = from & 7;
+            const file_to = to & 7;
+
+            // castle
+            if (file_from == 4 and (file_to == 2 or file_to == 6)) {
+                @branchHint(.unlikely);
+                const extra: Move.QuietSpecial = if (file_to == 2) .queen_castle else .king_castle;
+                movelist.add(.{
+                    .from = from,
+                    .to = to,
+                    .extra = .{ .quiet = extra },
+                });
+                return;
+            }
         }
+
+        const is_capture = (they >> to & 1) != 0;
+        std.debug.assert(!is_captures_only or is_capture);
 
         // regular move / regular capture
         movelist.add( .{
             .from = from,
             .to = to,
-            .is_capture = (black >> to & 1) != 0,
+            .is_capture = is_capture,
             .extra = .{ .capture = .none },
         });
     }
         
     // white piece -> all moves, black piece -> only attacks (isAttackedBy)
-    fn getMovesBitboard(self: *const Self, comptime kind: PieceKind, comptime rev_attacks: bool, pos: Square) u64 {
-        const white = self.state.white;
-        const black = self.state.black;
-        const blockers = white | black;
+    fn getMovesBitboard(self: *const Self, comptime is_captures_only: bool, bd: *const Board.BoardData, comptime kind: PieceKind, comptime rev_attacks: bool, pos: Square) u64 {
+        const they = if (bd.side_to_move == .white) bd.black else bd.white;
+        const blockers = bd.white | bd.black;
+
+        comptime {
+            std.debug.assert(!is_captures_only or !rev_attacks);
+        }
 
         switch (kind) {
             // TODO figure out hot do deal with EP capture for pawn attacks rev
-            .w_pawn => {
+            .w_pawn, .b_pawn => {
                 if (rev_attacks) {
-                    return pawnAttacksRev(.white, pos);
-                } else {
-                    const ep = if (self.state.ep_target) |target| @as(u64, 1) << target else 0;
-                    return whitePawnMoves(pos, white, black, ep);
+                    if (kind == .w_pawn) {
+                        return pawnAttacksRev(.white, pos);
+                    } else {
+                        return pawnAttacksRev(.black, pos);
+                    }
                 }
-
-            },
-            .b_pawn => {
-                if (rev_attacks) {
-                    return pawnAttacksRev(.black, pos);
-                } else {
-                    unreachable;
+                const ep = if (bd.en_passant_target) |target| @as(u64, 1) << target else 0;
+                const side = if (kind == .w_pawn) .white else .black;
+                const moves = pawnMoves(side, pos, blockers, ep);
+                if (is_captures_only) {
+                    return moves & (they | ep);
                 }
+                return moves;
             },
-            .w_knight, .b_knight => return LOOKUPS.knight_moves[pos],
+            .w_knight, .b_knight => {
+                const moves = LOOKUPS.knight_moves[pos];
+                if (is_captures_only) {
+                    return moves & they;
+                }
+                return moves;
+            },
             .w_bishop, .b_bishop => {
                 const actual_blockers = LOOKUPS.bishop_blockers_mask[pos] & blockers;
                 const magic = LOOKUPS.bishop_magic[pos];
                 const shift: u6 = @intCast(63 - LOOKUPS.bishop_shift[pos] + 1);
                 const base_index = LOOKUPS.bishop_index[pos];
                 const index = base_index + ((actual_blockers *% magic) >> shift);
-                return self.bishop_attacks[index];
+                const moves = self.bishop_attacks[index];
+                if (is_captures_only) {
+                    return moves & they;
+                }
+                return moves;
             },
             .w_rook, .b_rook => {
                 const actual_blockers = LOOKUPS.rook_blockers_mask[pos] & blockers;
@@ -779,136 +794,84 @@ pub const Movegen = struct {
                 const shift: u6 = @intCast(63 - LOOKUPS.rook_shift[pos] + 1);
                 const base_index = LOOKUPS.rook_index[pos];
                 const index = base_index + ((actual_blockers *% magic) >> shift);
-                return self.rook_attacks[index];
+                const moves = self.rook_attacks[index];
+                if (is_captures_only) {
+                    return moves & they;
+                }
+                return moves;
             },
             .w_queen, .b_queen => {
-                return self.getMovesBitboard(.w_bishop, rev_attacks, pos) | self.getMovesBitboard(.w_rook, rev_attacks, pos);
+                return self.getMovesBitboard(is_captures_only, bd, .w_bishop, rev_attacks, pos) | self.getMovesBitboard(is_captures_only, bd, .w_rook, rev_attacks, pos);
             },
             .w_king, .b_king => {
-                if (rev_attacks) {
-                    return LOOKUPS.king_moves[pos];
+                const val = LOOKUPS.king_moves[pos];
+                if (is_captures_only) return val & they;
+                if (rev_attacks) return val;
+                if (kind == .w_king) {
+                    return val | self.kingCastling(bd, .white);
                 } else {
-                    return LOOKUPS.king_moves[pos] | self.whiteKingCastling();
+                    return val | self.kingCastling(bd, .black);
                 }
             }
         }
     }
 
-    fn isAnySquareUnderAttack(self: *const Self, squares: u64) bool {
-        inline for (6..12) |i| {
-            const kind: PieceKind = @enumFromInt(i);
-            var pos = squares;
-            while (pos != 0) : (pos &= pos - 1) {
-                const piece_pos: Square = @intCast(@ctz(pos));
-                if (self.getMovesBitboard(kind, true, piece_pos) & self.state.pieces[i] != 0) {
-                    return true;
+    fn isAnySquareUnderAttack(self: *const Self, bd: *const Board.BoardData, squares: u64) bool {
+        const start: usize = if (bd.side_to_move == .white) 6 else 0;
+        for (start..start+6) |i| {
+            switch(@as(PieceKind, @enumFromInt(i))) {
+                inline else => |kind| {
+                    var pos = squares;
+                    while (pos != 0) : (pos &= pos - 1) {
+                        const piece_pos: Square = @intCast(@ctz(pos));
+                        if (self.getMovesBitboard(false, bd, kind, true, piece_pos) & bd.pieces[i] != 0) {
+                            return true;
+                        }
+                    }
                 }
             }
         }
         return false;
     }
 
-    fn whiteKingCastling(self: *const Self) u64 {
-        const state = &self.state;
-        if (!state.castling.white_kingside and !state.castling.white_queenside) 
+    fn kingCastling(self: *const Self, bd: *const Board.BoardData, comptime side: SideToMove) u64 {
+        const c = bd.castling_rights;
+        const can_kingside, const can_queenside = switch (side) {
+            .white => .{c.white_kingside, c.white_queenside},
+            .black => .{c.black_kingside, c.black_queenside},
+        };
+
+        if (!can_kingside and !can_queenside)
             return 0;
+ 
+        const all_pieces = bd.white | bd.black;
 
-        std.debug.assert(@ctz(state.pieces[@intFromEnum(PieceKind.w_king)]) == 4);
-        std.debug.assert(@popCount(state.pieces[@intFromEnum(PieceKind.w_king)]) == 1);
-
-        const all_pieces = state.white | state.black;
-
-        const can_kingside = state.castling.white_kingside;
-        const can_queenside = state.castling.white_queenside;
-
-        const KINGSIDE_ATTACKS_MASK  = 0b01110000;
-        const QUEENSIDE_ATTACKS_MASK = 0b00011100;
-        const KINGSIDE_SPACE_MASK    = 0b01100000;
-        const QUEENSIDE_SPACE_MASK   = 0b00001110;
+        const SHIFT = if (side == .white) 0 else 56; 
+        const KINGSIDE_ATTACKS_MASK  = 0b01110000 << SHIFT;
+        const QUEENSIDE_ATTACKS_MASK = 0b00011100 << SHIFT;
+        const KINGSIDE_SPACE_MASK    = 0b01100000 << SHIFT;
+        const QUEENSIDE_SPACE_MASK   = 0b00001110 << SHIFT;
 
         var moves: u64 = 0;
         if (all_pieces & KINGSIDE_SPACE_MASK == 0 and can_kingside) {
-            if (!self.isAnySquareUnderAttack(KINGSIDE_ATTACKS_MASK)) {
-                moves |= 1 << 6;
+            if (!self.isAnySquareUnderAttack(bd, KINGSIDE_ATTACKS_MASK)) {
+                moves |= 1 << (6 + SHIFT);
             }
         }
         if (all_pieces & QUEENSIDE_SPACE_MASK == 0 and can_queenside) {
-            if (!self.isAnySquareUnderAttack(QUEENSIDE_ATTACKS_MASK)) {
-                moves |= 1 << 2;
+            if (!self.isAnySquareUnderAttack(bd, QUEENSIDE_ATTACKS_MASK)) {
+                moves |= 1 << (2 + SHIFT);
             }
         }
 
         return moves;
     }
-
-    fn sideFlipState(self: *Self) void {
-        const state = &self.state;
-        std.mem.swap([6]u64, state.pieces[0..6], state.pieces[6..12]);
-
-        inline for (0..12) |i| {
-            state.pieces[i] = sideFlipBitboard(state.pieces[i]);
-        }
-
-        const white = sideFlipBitboard(state.black);
-        const black = sideFlipBitboard(state.white);
-
-        state.white = white;
-        state.black = black;
-
-        state.castling = state.castling.sideFlip();
-
-        if (state.ep_target) |*target| {
-            target.* = sideFlipSquare(target.*);
-        }
-    }
-
-    fn computeState(self: *Self, board: *const Board.BoardData) void {
-        if (self.is_dirty) {
-            self.is_dirty = false;
-
-            var white: u64 = 0;
-            inline for (0..6) |i| {
-                white |= board.pieces[i];
-            }
-
-            var black: u64 = 0;
-            inline for (6..12) |i| {
-                black |= board.pieces[i];
-            }
-
-
-            self.state = .{
-                .white = white,
-                .black = black,
-                .pieces = board.pieces,
-                .castling = board.castling_rights,
-                .ep_target = board.en_passant_target,
-            };
-
-            if (board.side_to_move != .white) {
-                self.sideFlipState();
-            }
-        }
-
-        std.debug.assert(@popCount(self.state.pieces[@intFromEnum(PieceKind.w_king)]) == 1);
-        std.debug.assert(@popCount(self.state.pieces[@intFromEnum(PieceKind.b_king)]) == 1);
-        
-        // TODO figure out why is this fails but movegen passes testsuite anyways???
-        // std.debug.assert(board.is_in_check == self.isKingInCheck());
-        if (board.is_in_check) {
-            self.state.castling = .NO_RIGHTS;
-        } else {
-            self.state.castling = board.castling_rights;
-            if (board.side_to_move != .white) {
-                self.state.castling = self.state.castling.sideFlip();
-            }
-        }
-
-    }
 };
 
 pub const Board = struct {
     pub const BoardData = struct {
+        white: u64 = 0,
+        black: u64 = 0,
         pieces: [12]u64,
         fullmoves: u12 = 0,
         halfmoves50: u8 = 0,
@@ -942,22 +905,36 @@ pub const Board = struct {
             };
             brd.recomputeZobristKey();
             brd.recomputeScores();
+            brd.recomputeSideMasks();
             break :blk brd;
         };
 
         pub fn getPieceAt(self: BoardData, square: Square) ?PieceKind {
-            inline for (0..12) |i| {
-                if (self.pieces[i] & @as(u64, 1) << square != 0) {
+            const mask = @as(u64, 1) << square;
+            if ((self.white | self.black) & mask == 0) return null;
+            const start: usize = if (self.white & mask != 0) 0 else 6;
+            for (start..start + 6) |i| {
+                if (self.pieces[i] & mask != 0) {
                     return @enumFromInt(i);
                 }
             }
-            return null;
+            unreachable;
         }
 
         pub fn popPieceAt(self: *BoardData, square: Square) ?PieceKind {
-            inline for (0..12) |i| {
-                if (self.pieces[i] & @as(u64, 1) << square != 0) {
-                    self.pieces[i] &= ~(@as(u64, 1) << square);
+            const mask = @as(u64, 1) << square;
+            if ((self.white | self.black) & mask == 0) return null;
+            var start: usize = 0;
+            if (self.white & mask != 0) {
+                self.white ^= mask;
+                start = 0;
+            } else {
+                self.black ^= mask;
+                start = 6;
+            }
+            for (start..start + 6) |i| {
+                if (self.pieces[i] & mask != 0) {
+                    self.pieces[i] &= ~mask;
                     self.zobrist_key ^= zobrist_hash.PIECE_SQUARES[i << 6 | square];
                     self.score_midgame -= eval.BONUS_TABLES[i][square][0];
                     self.score_endgame -= eval.BONUS_TABLES[i][square][1];
@@ -966,17 +943,23 @@ pub const Board = struct {
                     return piece;
                 }
             }
-            return null;
+            unreachable;
         }
 
         pub fn setPieceAt(self: *BoardData, square: Square, piece: PieceKind) void {
             const i: usize = @intFromEnum(piece);
-            std.debug.assert(self.pieces[i] & @as(u64, 1) << square == 0);
+            const mask = @as(u64, 1) << square;
+            std.debug.assert(self.pieces[i] & mask == 0);
+            if (i < 6) {
+                self.white ^= mask;
+            } else {
+                self.black ^= mask;
+            }
             self.zobrist_key ^= zobrist_hash.PIECE_SQUARES[i << 6 | square];
             self.score_midgame += eval.BONUS_TABLES[i][square][0];
             self.score_endgame += eval.BONUS_TABLES[i][square][1];
             self.game_phase += eval.GAME_PHASE_INCREMENT[i];
-            self.pieces[@intFromEnum(piece)] |= @as(u64, 1) << square;
+            self.pieces[@intFromEnum(piece)] |= mask;
         }
 
         pub fn debugPrint(self: BoardData, sink: *std.Io.Writer) !void {
@@ -1011,6 +994,12 @@ pub const Board = struct {
             self.game_phase = game_phase;
             self.score_midgame = score_midgame;
             self.score_endgame = score_endgame;
+        }
+
+        pub fn recomputeSideMasks(self: *BoardData) void {
+            const p = &self.pieces;
+            self.white = p[0] | p[1] | p[2] | p[3] | p[4] | p[5];
+            self.black = p[6] | p[7] | p[8] | p[9] | p[10] | p[11];
         }
 
         pub fn scoreMgEgToCurrent(self: *const BoardData, mg: i16, eg: i16) i16 {
@@ -1095,7 +1084,6 @@ pub const Board = struct {
         self.history.clearRetainingCapacity();
         self.history.appendSliceAssumeCapacity(other.history.items);
         self.data = other.data;
-        self.movegen.setDirty();
     }
 
     pub fn makeNullMove(self: *Self) bool {
@@ -1108,11 +1096,7 @@ pub const Board = struct {
 
         self.data.en_passant_target = null;
 
-        // TODO pointless???
-        self.movegen.setDirty();
-        self.movegen.computeState(&self.data);
-
-        const is_opponent_king_in_check = self.movegen.isKingInCheck();
+        const is_opponent_king_in_check = self.movegen.isKingInCheck(&self.data);
         // illegal move
         if (is_opponent_king_in_check) {
             self.unmakeMove();
@@ -1124,9 +1108,7 @@ pub const Board = struct {
         }
 
         self.data.side_to_move.flip();
-        std.debug.assert(!self.movegen.is_dirty);
-        self.movegen.sideFlipState();
-        self.data.is_in_check = self.movegen.isKingInCheck();
+        self.data.is_in_check = self.movegen.isKingInCheck(&self.data);
 
         // self.data.zobrist_key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.data.castling_rights))];
         self.data.zobrist_key ^= zobrist_hash.SIDE_TO_MOVE;
@@ -1142,6 +1124,8 @@ pub const Board = struct {
 
     pub fn makeMove(self: *Self, move: Move) bool {
         self.history.appendAssumeCapacity(.{ .data = self.data, .move = move });
+
+        // std.debug.print("-> {s}\n", .{move.algebraicNotation().toStr()});
 
         self.data.zobrist_key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.data.castling_rights))];
         if (self.data.en_passant_target) |square| {
@@ -1205,10 +1189,7 @@ pub const Board = struct {
 
         self.data.castling_rights.updateAfterMove(move);
 
-        self.movegen.setDirty();
-        self.movegen.computeState(&self.data);
-
-        const is_opponent_king_in_check = self.movegen.isKingInCheck();
+        const is_opponent_king_in_check = self.movegen.isKingInCheck(&self.data);
         // illegal move
         if (is_opponent_king_in_check) {
             self.unmakeMove();
@@ -1224,9 +1205,7 @@ pub const Board = struct {
         }
 
         self.data.side_to_move.flip();
-        std.debug.assert(!self.movegen.is_dirty);
-        self.movegen.sideFlipState();
-        self.data.is_in_check = self.movegen.isKingInCheck();
+        self.data.is_in_check = self.movegen.isKingInCheck(&self.data);
 
         self.data.zobrist_key ^= zobrist_hash.CASTLING_RIGHTS[@as(u4, @bitCast(self.data.castling_rights))];
         self.data.zobrist_key ^= zobrist_hash.SIDE_TO_MOVE;
@@ -1235,8 +1214,9 @@ pub const Board = struct {
     }
 
     pub fn unmakeMove(self: *Self) void {
-        self.movegen.setDirty();
-        self.data = self.history.pop().?.data;
+        const hist_state = self.history.pop().?;
+        self.data = hist_state.data;
+        // std.debug.print("<- {s}\n", .{hist_state.move.algebraicNotation().toStr()});
     }
 
     pub fn repetitionsCount(self: *const Self) u32 {
@@ -1260,9 +1240,7 @@ pub const Board = struct {
         self.data = bd;
         self.data.recomputeZobristKey();
         self.data.recomputeScores();
-        self.movegen.setDirty();
-        self.movegen.computeState(&self.data);
-        self.data.is_in_check = self.movegen.isKingInCheck();
+        self.data.is_in_check = self.movegen.isKingInCheck(&self.data);
     }
     
     pub fn clearHistory(self: *Self) void {
@@ -1282,7 +1260,7 @@ pub const Board = struct {
                 const from = if (cside == .white) 0 else 6;
                 inline for (from..from+6) |p| {
                     const piece: PieceKind = @enumFromInt(p);
-                    const attackers = self.movegen.getMovesBitboard(piece, true, square) & self.data.pieces[p];
+                    const attackers = self.movegen.getMovesBitboard(true, piece, true, square) & self.data.pieces[p];
                     if (attackers != 0) {
                         return .{ piece, attackers };
                     }
@@ -1724,26 +1702,15 @@ pub const MoveList = struct {
     }
 };
 
-fn genPieceAttacks(comptime movesFn: anytype, piece_bitboard: u64, white_all: u64, black_all: u64) u64 {
-    var pieces = piece_bitboard;
-    var attacks_all: u64 = 0;
-    while (pieces != 0) : (pieces &= pieces - 1) {
-        const from: Square = @intCast(@ctz(pieces));
-        // be careful with a pawn attacks/moves
-        const to_all = movesFn(from, white_all, black_all);
-        attacks_all |= to_all;
-    }
-    return attacks_all;
-}
-
-fn whitePawnMoves(piece_pos: Square, white_pieces: u64, black_pieces: u64, ep_targets: u64) u64 {
-    const all_pieces = white_pieces | black_pieces;
+fn pawnMoves(comptime side: SideToMove, piece_pos: Square, blockers: u64, ep_targets: u64) u64 {
     const piece = @as(u64, 1) << piece_pos;
-    const up_raw = bitboardUp(piece);
-    const up = up_raw & ~all_pieces;
-    const doubleup = bitboardUp(up & rankMask(2)) & ~all_pieces;
+    const upFn = if (side == .white) bitboardUp else bitboardDown;
+    const up_raw = upFn(piece);
+    const up = up_raw & ~blockers;
+    const double_mask = if (side == .white) rankMask(2) else rankMask(5);
+    const doubleup = upFn(up & double_mask) & ~blockers;
 
-    const captures = (bitboardLeft(up_raw) | bitboardRight(up_raw)) & (all_pieces | ep_targets);
+    const captures = (bitboardLeft(up_raw) | bitboardRight(up_raw)) & (blockers | ep_targets);
     const moves = up | doubleup;
 
     return moves | captures;

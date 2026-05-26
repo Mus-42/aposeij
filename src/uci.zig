@@ -159,7 +159,7 @@ pub const UciConnection = struct {
 
         while (command_parts.next()) |move| {
             var moves = board.MoveList{};
-            brd.movegen.genMoves(&brd.data, &moves);
+            brd.movegen.genMoves(false, &brd.data, &moves);
             var found = false;
             for (moves.moves()) |m| {
                 if (std.mem.eql(u8, m.algebraicNotation().toStr(), move)) {
