@@ -711,6 +711,7 @@ pub const SearchThread = struct {
         self.history.reset();
         self.pv.clearRoot();
         self.time_controls.startSearch();
+        self.preSearchCleanup();
 
         var best_move: Move = .NULL;
 
@@ -722,15 +723,12 @@ pub const SearchThread = struct {
         while (true) {
             d += 1;
 
-            self.preSearchCleanup();
 
             self.logger.startNewSearch(fen, key) catch {};
 
-            const search_iteration_beg = std.Io.Timestamp.now(self.io, .awake);
             const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             self.pv.updateRootPv();
             const search_iteration_end = std.Io.Timestamp.now(self.io, .awake);
-            const iteration_time = search_iteration_beg.durationTo(search_iteration_end);
             const search_time = self.time_controls.search_start.durationTo(search_iteration_end);
 
             self.logger.finishSearch() catch {};
@@ -744,7 +742,7 @@ pub const SearchThread = struct {
                     .time_ms = @intCast(@as(u96, @intCast(search_time.nanoseconds)) / std.time.ns_per_ms),
                     .nodes = self.nodes,
                     .qs_nodes = self.qsearch_nodes,
-                    .nps =  @as(u64, @intCast(@as(u96, self.nodes + self.qsearch_nodes) * std.time.ns_per_s / @max(iteration_time.nanoseconds, 1))),
+                    .nps =  @as(u64, @intCast(@as(u96, self.nodes + self.qsearch_nodes) * std.time.ns_per_s / @max(search_time.nanoseconds, 1))),
                     .pv = self.pv.perPly(0),
                     .score = score,
                 };
@@ -776,6 +774,8 @@ pub const SearchThread = struct {
 
         self.time_controls.startSearch();
         self.history.reset();
+        self.time_controls.startSearch();
+        self.preSearchCleanup();
 
         var depth_limit: u32 = MAX_PLY;
         var found_at: u16 = MAX_PLY;
@@ -783,8 +783,6 @@ pub const SearchThread = struct {
         var d: u32 = 0;
         while (d < depth_limit) {
             d += 1;
-
-            self.preSearchCleanup();
 
             const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             const is_canceled = self.time_controls.isStopSet();
@@ -798,6 +796,7 @@ pub const SearchThread = struct {
                 // TODO smarter depth limit
                 depth_limit = @min(depth_limit, mate_at_ply+6);
             }
+
         }
 
         return plyToMoves(found_at);

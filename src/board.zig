@@ -168,6 +168,7 @@ const MovegenComptimeLookups = struct {
     // precomputed moves
     knight_moves: [64]u64,
     king_moves: [64]u64,
+    ultra_attacks: [64]u64,
 };
 
 const LOOKUPS: MovegenComptimeLookups = blk: {
@@ -464,6 +465,7 @@ const LOOKUPS: MovegenComptimeLookups = blk: {
         },
         .knight_moves = undefined,
         .king_moves = undefined,
+        .ultra_attacks = undefined,
     };
 
     const exclude_ranks = ~rankMask(0) & ~rankMask(7);
@@ -473,11 +475,15 @@ const LOOKUPS: MovegenComptimeLookups = blk: {
         const pos: Square = @intCast(i);
         const rank: u3 = @intCast(pos >> 3);
         const file: u3 = @intCast(pos & 7);
-        lookups.knight_moves[i] = knightAttacksSlow(pos);
+        const knight_attacks = knightAttacksSlow(pos);
+        lookups.knight_moves[i] = knight_attacks;
         lookups.king_moves[i] = kingAttacksSlow(pos);
         const exclude_pos = ~(@as(u64, 1) << pos);
-        lookups.bishop_blockers_mask[i] = bishopAttacksSlow(pos, 0) & exclude_ranks & exclude_files & exclude_pos;
+        const bishop_attacks = bishopAttacksSlow(pos, 0);
+        const rook_attacks = rookAttacksSlow(pos, 0);
+        lookups.bishop_blockers_mask[i] = bishop_attacks & exclude_ranks & exclude_files & exclude_pos;
         lookups.rook_blockers_mask[i] = ((rankMask(rank) & exclude_files) | (fileMask(file) & exclude_ranks)) & exclude_pos;
+        lookups.ultra_attacks[i] = knight_attacks | rook_attacks | bishop_attacks;
     }
     
     break :blk lookups;
@@ -658,11 +664,12 @@ pub const Movegen = struct {
     // TODO split into phases (like caputres / quiets ...?)
 
     pub fn genMoves(self: *Self, comptime is_captures_only: bool, bd: *const Board.BoardData, movelist: *MoveList) void {
-        const us = if (bd.side_to_move == .white) bd.white else bd.black;
-        const start: usize = if (bd.side_to_move == .white) 0 else 6;
-        for (start..start+6) |i| {
-            switch(@as(PieceKind, @enumFromInt(i))) {
-                inline else => |kind| {
+        switch (bd.side_to_move) {
+            inline else => |side| {
+                const us = if (side == .white) bd.white else bd.black;
+                const start: usize = if (side == .white) 0 else 6;
+                inline for (start..start+6) |i| {
+                    const kind: PieceKind = @enumFromInt(i);
                     var pieces = bd.pieces[i];
                     while (pieces != 0) : (pieces &= pieces - 1) {
                         const from: Square = @intCast(@ctz(pieces));
@@ -817,20 +824,28 @@ pub const Movegen = struct {
     }
 
     fn isAnySquareUnderAttack(self: *const Self, bd: *const Board.BoardData, squares: u64) bool {
-        const start: usize = if (bd.side_to_move == .white) 6 else 0;
-        for (start..start+6) |i| {
-            switch(@as(PieceKind, @enumFromInt(i))) {
-                inline else => |kind| {
-                    var pos = squares;
-                    while (pos != 0) : (pos &= pos - 1) {
-                        const piece_pos: Square = @intCast(@ctz(pos));
-                        if (self.getMovesBitboard(false, bd, kind, true, piece_pos) & bd.pieces[i] != 0) {
-                            return true;
+        std.debug.assert(@popCount(squares) <= 3);
+        switch (bd.side_to_move) {
+            inline else => |side| {
+                const start: usize = if (side == .white) 6 else 0;
+                const they = if (side == .white) bd.black else bd.white;
+                var pos = squares;
+                inline for (0..3) |_| {
+                    if (pos == 0) return false;
+                    const piece_pos: Square = @intCast(@ctz(pos));
+                    if (LOOKUPS.ultra_attacks[piece_pos] & they != 0) {
+                        inline for (start..start+6) |i| {
+                            const kind: PieceKind = @enumFromInt(i);
+                            if (self.getMovesBitboard(false, bd, kind, true, piece_pos) & bd.pieces[i] != 0) {
+                                return true;
+                            }
                         }
                     }
+                    pos &= pos - 1;
                 }
             }
         }
+
         return false;
     }
 

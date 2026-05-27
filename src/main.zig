@@ -248,7 +248,6 @@ fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !v
         //     }
         // }
 
-        // TODO accumulate nodes from each iterative deepening iteration, not only from the last one
         nodes += search_thread.nodes;
         nodes += search_thread.qsearch_nodes;
     }
