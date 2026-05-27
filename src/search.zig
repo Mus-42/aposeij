@@ -55,11 +55,6 @@ pub fn scoreToMateInMovesAbs(score: i16) ?u16 {
     return plyToMoves(mate_ply);
 }
 
-pub const NodeType = enum {
-    Pv,
-    NonPv
-};
-
 pub const TimeControls = struct {
     io: std.Io,
     available_time_ns: u64 = MAX_THINKING_TIME_NS,
@@ -257,12 +252,22 @@ pub const SearchThread = struct {
             return MOVESCORE_KILLER;
         }
 
-        if (move.isNoisy()) {
-            const score = self.scoreMoveQsearch(move, tt_move);
+        if (move.is_promotion) {
+            const piece = @intFromEnum(move.extra.promotion.toPiece(.white));
+            var score = evaluation.PIECE_COST_ABS[piece][0];
+            score += self.history.getNoisy(self.brd.data.side_to_move, move);
+            return MOVESCORE_PROMOTION + score;
+        }
 
-            if (score >= 0) {
+        if (move.is_capture) {
+            var score = evaluation.mvv(self.brd.data, move);
+            score += self.history.getNoisy(self.brd.data.side_to_move, move);
+            const see = self.brd.seeAfterMove(move);
+
+            if (see * 32 >= -score) {
                 return MOVESCORE_GOOD_CAPTURE + score;
             }
+
 
             return MOVESCORE_BAD_CAPTURE + score;
         }
@@ -284,11 +289,9 @@ pub const SearchThread = struct {
         }
 
         if (move.is_capture) {
-            // score += self.brd.seeAfterMove(move);
-            score += evaluation.captureMoveMaterial(self.brd.data, move) ;
+            score += evaluation.mvv(self.brd.data, move);
         }
 
-        // TODO SSE
         score += self.history.getNoisy(self.brd.data.side_to_move, move);
 
         return score;
@@ -304,7 +307,7 @@ pub const SearchThread = struct {
         }
     }
 
-    fn qsearch(self: *Self, comptime node_type: NodeType, root_alpha: i16, root_beta: i16, ply: u32) i16 {
+    fn qsearch(self: *Self, root_alpha: i16, root_beta: i16, ply: u32) i16 {
         if (self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
             return root_alpha;
         }
@@ -314,9 +317,7 @@ pub const SearchThread = struct {
 
         self.qsearch_nodes += 1;
 
-        const is_pv_node = node_type == .Pv;
-        std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
-
+        const is_pv_node = root_alpha != root_beta - 1;
         if (self.brd.isDraw50Moves() or self.brd.repetitionsCount() > 0)
             return 0;
 
@@ -387,16 +388,18 @@ pub const SearchThread = struct {
         for (0..moves.count()) |_| {
             const move, const score = moves.pickNext();
             _ = score;
-            //and move.is_capture and self.brd.seeAfterMove(move) < 0
             if (!in_check and moves_played >= 4)
                 break;
+
+            if (!in_check and moves_played >= 2 and move.is_capture and self.brd.seeAfterMove(move) < 1)
+                continue;
 
             if (self.brd.makeMove(move))
                 continue;
 
             moves_played += 1;
 
-            const move_eval = -self.qsearch(node_type, -beta, -alpha, ply+1);
+            const move_eval = -self.qsearch(-beta, -alpha, ply+1);
             self.brd.unmakeMove();
 
             if (self.time_controls.isStopSet()) {
@@ -448,7 +451,6 @@ pub const SearchThread = struct {
 
     fn search(
         self: *Self,
-        comptime node_type: NodeType,
         root_alpha: i16,
         root_beta: i16,
         remaining_depth: u32,
@@ -461,9 +463,8 @@ pub const SearchThread = struct {
         }
 
         const in_check = self.brd.data.is_in_check;
-        const is_pv_node = node_type == .Pv;
+        const is_pv_node = root_alpha != root_beta - 1;
         const zobrist_key = self.brd.data.zobrist_key;
-        std.debug.assert(is_pv_node or (root_alpha == root_beta - 1));
 
         self.pv.clearPly(ply);
         self.nodes += 1;
@@ -486,7 +487,7 @@ pub const SearchThread = struct {
             return 0;
 
         if (remaining_depth == 0 or ply >= MAX_PLY) {
-            return self.qsearch(node_type, alpha, beta, ply);
+            return self.qsearch(alpha, beta, ply);
         }
 
         var tt_move: Move = .NULL;
@@ -513,7 +514,7 @@ pub const SearchThread = struct {
             tt_move = self.pv.root_pv[0];
         }
 
-        const static_eval = self.qsearch(node_type, alpha, beta, ply);
+        const static_eval = self.qsearch(alpha, beta, ply);
         if (self.time_controls.isStopSet()) {
             return alpha;
         }
@@ -522,8 +523,18 @@ pub const SearchThread = struct {
 
         if (!is_pv_node and !in_check) {
             // RFP
-            if (@abs(alpha) < 2000) {
-                const margin = @as(i16, @intCast(150 * remaining_depth));
+            if (remaining_depth <= 8 and @abs(alpha) < 2000) {
+                var margin = @as(i16, @intCast(80 * remaining_depth));
+                // TODO double check this. it shouldn't gain but it gains for some reason.
+                if (tt_move == Move.NULL) {
+                    margin -|= 50;
+                }
+                if (tt_move.isNoisy()) {
+                    margin -|= 50;
+                }
+                // margin -|= 100;
+                margin = @max(margin, 40);
+
                 if (static_eval >= beta + margin) {
                     return static_eval;
                 }
@@ -540,7 +551,7 @@ pub const SearchThread = struct {
                     // TODO eval-based reduction
                     // const depth_reduction = @min(1 + remaining_depth/2, 4);
                     const depth_reduction = (11 + remaining_depth * 5) / 8;
-                    const nm_score = -self.search(.NonPv, -beta, -beta + 1, remaining_depth - depth_reduction, ply+1, extensions_used, false);
+                    const nm_score = -self.search(-beta, -beta + 1, remaining_depth - depth_reduction, ply+1, extensions_used, false);
                     self.brd.unmakeNullMove();
                     if (self.time_controls.isStopSet()) {
                         return alpha;
@@ -549,7 +560,7 @@ pub const SearchThread = struct {
                     if (nm_score >= beta) {
                         return nm_score;
                         // TODO more conditions on NMP / double -> enable verification
-                        // const nm_score_verif = self.search(.NonPv, beta - 1, beta, remaining_depth - depth_reduction, ply, extensions_used, false);
+                        // const nm_score_verif = self.search(beta - 1, beta, remaining_depth - depth_reduction, ply, extensions_used, false);
                         // if (nm_score_verif >= beta) {
                         //     return nm_score_verif;
                         // }
@@ -604,7 +615,7 @@ pub const SearchThread = struct {
             // TODO fix move ordering and implement actual LMR
             var reduction: u32 = 0;
             if (legal_moves > 2 and remaining_depth > 1 and score < MOVESCORE_KILLER) {
-                reduction = @intFromFloat(7.2 + @log(@as(f32, @floatFromInt(remaining_depth))) * @log(@as(f32, @floatFromInt(legal_moves))) * 2.5);
+                reduction = @intFromFloat(7.0 + @log(@as(f32, @floatFromInt(remaining_depth))) * @log(@as(f32, @floatFromInt(legal_moves))) * 3.5);
 
                 if (is_pv_node) {
                     reduction -|= 5;
@@ -629,12 +640,12 @@ pub const SearchThread = struct {
             // PVS
             var move_eval: i16 = -SCORE_INFINITY;
             if (remaining_depth < 2 or legal_moves < 3) {
-                move_eval = -self.search(node_type, -beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
+                move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
             } else {
                 // TODO remove seach extensions from heare when moveordering is better
-                move_eval = -self.search(.NonPv, -(alpha+1), -alpha, search_depth - reduction, ply + 1, extensions_used + search_ext, true);
+                move_eval = -self.search(-(alpha+1), -alpha, search_depth - reduction, ply + 1, extensions_used + search_ext, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
-                    move_eval = -self.search(.Pv, -beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
+                    move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
                 }
             }
 
@@ -723,10 +734,9 @@ pub const SearchThread = struct {
         while (true) {
             d += 1;
 
-
             self.logger.startNewSearch(fen, key) catch {};
 
-            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+            const score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             self.pv.updateRootPv();
             const search_iteration_end = std.Io.Timestamp.now(self.io, .awake);
             const search_time = self.time_controls.search_start.durationTo(search_iteration_end);
@@ -784,7 +794,7 @@ pub const SearchThread = struct {
         while (d < depth_limit) {
             d += 1;
 
-            const score = self.search(.Pv, -SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+            const score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             const is_canceled = self.time_controls.isStopSet();
             
             if (is_canceled) {

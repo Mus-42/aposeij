@@ -198,6 +198,13 @@ pub const BONUS_TABLES: [12][64][2]i16 = blk: {
 //     break :blk bonus;
 // };
 
+pub fn mvv(bd: Board.BoardData, move: Move) i16 {
+    const to_square = if (!move.is_promotion and move.extra.capture == .ep_capture) move.to ^ 8 else move.to;
+    const to = bd.getPieceAt(to_square).?;
+
+    return PIECE_COST_ABS[@intFromEnum(to)][0];
+}
+
 pub fn captureMoveMaterial(bd: Board.BoardData, move: Move) i16 {
     const from = bd.getPieceAt(move.from).?;
     const to_square = if (!move.is_promotion and move.extra.capture == .ep_capture) move.to ^ 8 else move.to;

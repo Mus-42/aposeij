@@ -1275,7 +1275,7 @@ pub const Board = struct {
                 const from = if (cside == .white) 0 else 6;
                 inline for (from..from+6) |p| {
                     const piece: PieceKind = @enumFromInt(p);
-                    const attackers = self.movegen.getMovesBitboard(true, piece, true, square) & self.data.pieces[p];
+                    const attackers = self.movegen.getMovesBitboard(false, &self.data, piece, true, square) & self.data.pieces[p];
                     if (attackers != 0) {
                         return .{ piece, attackers };
                     }
