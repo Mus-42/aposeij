@@ -8,47 +8,37 @@ const PieceKind = board.PieceKind;
 const Board = board.Board;
 
 pub const History = struct {
-    pub const Entry = struct {
-        quiet_hist: i16 = 0,
-        noisy_hist: i16 = 0,
-    };
-
     // TODO experiment with non-butterfly tables
-    butterfly_entries: [2 * 64 * 64]Entry,
+    quiet: [2][64][64]i16,
+    noisy: [12][64][64]i16,
 
     const Self = @This();
 
     pub fn reset(self: *Self) void {
-        @memset(&self.butterfly_entries, .{});
+        @memset(std.mem.sliceAsBytes(&self.quiet), 0);
+        @memset(std.mem.sliceAsBytes(&self.noisy), 0);
     }
 
-    pub fn butterflyIndex(color: board.SideToMove, move: Move) usize {
-        return @as(usize, @intFromEnum(color)) << 12 | @as(usize, move.from) << 6 | @as(usize, move.to);
+    pub fn getQuiet(self: *Self, bd: *const board.Board.BoardData, move: Move) *i16 {
+        return &self.quiet[@intFromEnum(bd.side_to_move)][move.from][move.to];
     }
 
-    pub fn getQuiet(self: *const Self, color: board.SideToMove, move: Move) i16 {
-        const i = butterflyIndex(color, move);
-        return self.butterfly_entries[i].quiet_hist;
+    pub fn getNoisy(self: *Self, bd: *const board.Board.BoardData, move: Move) *i16 {
+        const piece = bd.getPieceAt(move.from).?;
+        return &self.noisy[@intFromEnum(piece)][move.from][move.to];
     }
 
-    pub fn getNoisy(self: *const Self, color: board.SideToMove, move: Move) i16 {
-        const i = butterflyIndex(color, move);
-        return self.butterfly_entries[i].noisy_hist;
-    }
-
-    pub fn updateQuiet(self: *Self, color: board.SideToMove, move: Move, raw_bonus: i32) void {
-        const i = butterflyIndex(color, move);
+    pub fn updateQuiet(self: *Self, bd: *const board.Board.BoardData, move: Move, raw_bonus: i32) void {
         const MAX_BONUS = search.MOVESCORE_KILLER;
         const bonus = @max(@min(raw_bonus, MAX_BONUS), -MAX_BONUS);
-        const value = &self.butterfly_entries[i].quiet_hist;
+        const value = self.getQuiet(bd, move);
         value.* +|= @intCast(bonus - @divTrunc(@as(i32, value.*) * @as(i32, @intCast(@abs(bonus))), MAX_BONUS));
     }
 
-    pub fn updateNoisy(self: *Self, color: board.SideToMove, move: Move, raw_bonus: i32) void {
-        const i = butterflyIndex(color, move);
+    pub fn updateNoisy(self: *Self, bd: *const board.Board.BoardData, move: Move, raw_bonus: i32) void {
         const MAX_BONUS = 0x1000;//search.MOVESCORE_KILLER;
         const bonus = @max(@min(raw_bonus, MAX_BONUS), -MAX_BONUS);
-        const value = &self.butterfly_entries[i].noisy_hist;
+        const value = self.getNoisy(bd, move);
         value.* +|= @intCast(bonus - @divTrunc(@as(i32, value.*) * @as(i32, @intCast(@abs(bonus))), MAX_BONUS));
     }
 };

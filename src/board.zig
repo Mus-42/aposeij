@@ -1514,11 +1514,11 @@ pub fn writeFen(buffer: []u8, board: Board.BoardData) []const u8 {
     return buffer[0..i];
 }
 
-const zobrist_hash = struct {
-    const XorshiftRng = struct {
+pub const zobrist_hash = struct {
+    pub const XorshiftRng = struct {
         state: u64,
 
-        fn next(self: *XorshiftRng) u64 {
+        pub fn next(self: *XorshiftRng) u64 {
             var x = self.state;
 
             x ^= x << 13;

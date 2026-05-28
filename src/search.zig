@@ -32,8 +32,8 @@ pub const TIME_EPS_NS: u64 = 2000;
 // quiet
 // captured (bad)
 pub const MOVESCORE_TT = 0x7FFF;
-pub const MOVESCORE_GOOD_CAPTURE = 0x5000;
-pub const MOVESCORE_PROMOTION = 0x5100;
+pub const MOVESCORE_GOOD_CAPTURE = 0x5100;
+pub const MOVESCORE_PROMOTION = 0x5200;
 pub const MOVESCORE_KILLER = 0x5000;
 pub const MOVESCORE_BAD_CAPTURE = -0x5000;
 
@@ -113,6 +113,11 @@ pub const TimeControls = struct {
         if (self.isStopSet())
             return true;
         if (depth >= self.depth_limit) {
+            self.is_exiting_search.store(true, .unordered);
+            return true;
+        }
+        const passed = self.search_start.untilNow(self.io, .awake);
+        if (self.available_time_ns -| (@divTrunc(passed.nanoseconds * 5, 3)) <= TIME_EPS_NS) {
             self.is_exiting_search.store(true, .unordered);
             return true;
         }
@@ -212,7 +217,6 @@ pub const SearchThread = struct {
         var logger = try logs.SearchLogger.init(io, alloc);
         errdefer logger.deinit();
 
-
         return .{
             .alloc = alloc,
             .io = io,
@@ -248,31 +252,34 @@ pub const SearchThread = struct {
             return MOVESCORE_TT;
         }
 
-        if (self.per_ply[ply].killers[0] == move or self.per_ply[ply].killers[1] == move) {
-            return MOVESCORE_KILLER;
+        const k = &self.per_ply[ply].killers;
+        if (k[0] == move or k[1] == move) {
+            const score: i16 = MOVESCORE_KILLER;
+            return score;
         }
 
         if (move.is_promotion) {
-            const piece = @intFromEnum(move.extra.promotion.toPiece(.white));
-            var score = evaluation.PIECE_COST_ABS[piece][0];
-            score += self.history.getNoisy(self.brd.data.side_to_move, move);
-            return MOVESCORE_PROMOTION + score;
+            const piece = move.extra.promotion.toPiece(.white);
+            var score = evaluation.PIECE_COST_ABS[@intFromEnum(piece)][0];
+            const hscore = self.history.getNoisy(&self.brd.data, move).*;
+            score += hscore;
+            return score + MOVESCORE_PROMOTION;
         }
 
         if (move.is_capture) {
             var score = evaluation.mvv(self.brd.data, move);
-            score += self.history.getNoisy(self.brd.data.side_to_move, move);
+            const hscore = self.history.getNoisy(&self.brd.data, move).*;
             const see = self.brd.seeAfterMove(move);
+            score += hscore;
 
             if (see * 32 >= -score) {
                 return MOVESCORE_GOOD_CAPTURE + score;
             }
 
-
             return MOVESCORE_BAD_CAPTURE + score;
         }
 
-        const move_history = self.history.getQuiet(self.brd.data.side_to_move, move);
+        const move_history = self.history.getQuiet(&self.brd.data, move).*;
         return @min(@max(move_history, MOVESCORE_BAD_CAPTURE), MOVESCORE_KILLER);
     }
 
@@ -292,7 +299,7 @@ pub const SearchThread = struct {
             score += evaluation.mvv(self.brd.data, move);
         }
 
-        score += self.history.getNoisy(self.brd.data.side_to_move, move);
+        score += self.history.getNoisy(&self.brd.data, move).*;
 
         return score;
     }
@@ -441,10 +448,10 @@ pub const SearchThread = struct {
     }
 
     fn addKiller(self: *Self, ply: u32, move: Move) void {
-        const killers = &self.per_ply[ply].killers;
-        if (killers[0] != move and killers[1] != move) {
-            killers[1] = killers[0]; 
-            killers[0] = move; 
+        const k = &self.per_ply[ply].killers;
+        if (k[0] != move and k[1] != move) {
+            k[1] = k[0]; 
+            k[0] = move; 
         }
     }
 
@@ -544,14 +551,13 @@ pub const SearchThread = struct {
             }
 
             // NMP
-            if (allow_null and @abs(beta) < SCORE_MATE_ABS and remaining_depth > 1 and ply > 0) {
+            if (allow_null and @abs(beta) < SCORE_MATE_ABS - SCORE_MATE_EPS and remaining_depth > 1 and ply > 0) {
                 const pieces = &self.brd.data.pieces;
                 const is_pawns_only = (pieces[1] | pieces[2] | pieces[3] | pieces[4] | pieces[7] | pieces[8] | pieces[9] | pieces[10]) == 0;
                 if (!is_pawns_only and !self.brd.makeNullMove()) {
                     // TODO eval-based reduction
-                    // const depth_reduction = @min(1 + remaining_depth/2, 4);
-                    const depth_reduction = (11 + remaining_depth * 5) / 8;
-                    const nm_score = -self.search(-beta, -beta + 1, remaining_depth - depth_reduction, ply+1, extensions_used, false);
+                    const depth_reduction = @min((11 + remaining_depth * 5) / 8, 6);
+                    const nm_score = -self.search(-beta, -beta + 1, remaining_depth -| depth_reduction, ply+1, extensions_used, false);
                     self.brd.unmakeNullMove();
                     if (self.time_controls.isStopSet()) {
                         return alpha;
@@ -665,25 +671,23 @@ pub const SearchThread = struct {
 
                 tt_bound = .lower;
 
-
-                const color = self.brd.data.side_to_move;
                 const bonus: i16 = @intCast(remaining_depth * remaining_depth);
                 const malus: i16 = bonus; // TODO
                 if (!best_move.isNoisy()) {
-                    self.history.updateQuiet(color, best_move, bonus);
+                    self.history.updateQuiet(&self.brd.data, best_move, bonus);
                     for (moves.moves()) |quiet| {
                         if (quiet == best_move) break;
                         if (quiet.isNoisy()) continue;
-                        self.history.updateQuiet(color, quiet, -malus);
+                        self.history.updateQuiet(&self.brd.data, quiet, -malus);
                     }
                 } else {
-                    self.history.updateNoisy(color, best_move, bonus);
+                    self.history.updateNoisy(&self.brd.data, best_move, bonus);
                 }
 
                 for (moves.moves()) |noisy| {
                     if (noisy == best_move) break;
                     if (!noisy.isNoisy()) continue;
-                    self.history.updateNoisy(color, noisy, -malus);
+                    self.history.updateNoisy(&self.brd.data, noisy, -malus);
                 }
                 break;
             }
