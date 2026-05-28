@@ -199,6 +199,8 @@ pub const SearchThread = struct {
     logger: logs.SearchLogger,
 
     const PerPly = struct {
+        eval: i16,
+        static_eval: i16,
         killers: [2]Move,
         moves: board.MoveList,
     };
@@ -498,6 +500,7 @@ pub const SearchThread = struct {
         }
 
         var tt_move: Move = .NULL;
+        var can_iid: bool = true;
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             if (!is_pv_node and tt_entry.depth >= remaining_depth and ply > 0) { 
                 if (tt_entry.bound == .exact or 
@@ -509,6 +512,7 @@ pub const SearchThread = struct {
 
             tt_move = tt_entry.move;
     
+            can_iid = tt_move != Move.NULL and tt_entry.depth + 5 <= remaining_depth;
             // TODO ..?
             // if (tt_entry.bound == .exact or 
             //     tt_entry.bound == .lower and tt_entry.score >= eval or
@@ -521,17 +525,19 @@ pub const SearchThread = struct {
             tt_move = self.pv.root_pv[0];
         }
 
-        const static_eval = self.qsearch(alpha, beta, ply);
-        if (self.time_controls.isStopSet()) {
-            return alpha;
-        }
+        const static_eval = self.evalPosition();
+        self.per_ply[ply].static_eval = static_eval;
+
+
+        const improving = !in_check and ply > 1 and self.per_ply[ply].static_eval > self.per_ply[ply - 2].static_eval;
 
         var eval: i16 = -SCORE_INFINITY;
 
         if (!is_pv_node and !in_check) {
             // RFP
             if (remaining_depth <= 8 and @abs(alpha) < 2000) {
-                var margin = @as(i16, @intCast(80 * remaining_depth));
+                const factor: i16 = 80;
+                var margin = factor * @as(i16, @intCast(remaining_depth));
                 // TODO double check this. it shouldn't gain but it gains for some reason.
                 if (tt_move == Move.NULL) {
                     margin -|= 50;
@@ -539,7 +545,6 @@ pub const SearchThread = struct {
                 if (tt_move.isNoisy()) {
                     margin -|= 50;
                 }
-                // margin -|= 100;
                 margin = @max(margin, 40);
 
                 if (static_eval >= beta + margin) {
@@ -598,6 +603,21 @@ pub const SearchThread = struct {
 
         for (0..moves.count()) |_| {
             const move, const score = moves.pickNext();
+
+            const hist_score = if (move.isNoisy()) 
+                self.history.getNoisy(&self.brd.data, move).*
+            else 
+                self.history.getQuiet(&self.brd.data, move).*;
+
+            if (ply > 0 and score < MOVESCORE_KILLER) {
+                // LMP
+                const lmp_factor: u32 = if (improving) 29 else 37;
+                const lmp_margin = (75 + lmp_factor * remaining_depth * remaining_depth) / 32;
+                if (!is_pv_node and !in_check and legal_moves >= lmp_margin) {
+                    break;
+                }
+            }
+
             if (self.brd.makeMove(move))
                 continue;
             legal_moves += 1;
@@ -611,36 +631,39 @@ pub const SearchThread = struct {
             if (move.is_promotion and move.extra.promotion == .queen) {
                 search_ext += 1;
             }
-            if (moves_len == 1) {
-                search_ext += 1;
-            }
             search_ext = @min(search_ext + extensions_used, MAX_EXTENSIONS) - extensions_used;
  
-            const search_depth = remaining_depth - 1 + search_ext;
+            var search_depth: u32 = remaining_depth - 1 + search_ext;
 
             // TODO fix move ordering and implement actual LMR
-            var reduction: u32 = 0;
+            var reduction: i16 = 0;
             if (legal_moves > 2 and remaining_depth > 1 and score < MOVESCORE_KILLER) {
                 reduction = @intFromFloat(7.0 + @log(@as(f32, @floatFromInt(remaining_depth))) * @log(@as(f32, @floatFromInt(legal_moves))) * 3.5);
-
-                if (is_pv_node) {
-                    reduction -|= 5;
-                }
+                const hist_divisor: i16 = if (move.isNoisy()) 2000 else 4000;
+                reduction -= @divTrunc(hist_score, hist_divisor);
 
                 if (!is_pv_node and tt_move.isNoisy()) {
                     reduction += 3;
                 }
 
                 if (in_check or new_in_check) {
-                    reduction -|= 5;
+                    reduction -= 5;
 
                     if (in_check and new_in_check) {
-                        reduction -|= 2;
+                        reduction -= 2;
                     }
                 }
 
-                reduction /= 8;
-                reduction = @min(reduction, search_depth-|1);
+                if (is_pv_node) {
+                    reduction -= 5;
+                }
+
+                reduction = @divTrunc(reduction, 8);
+                reduction = @max(reduction, 0);
+            }
+
+            if (remaining_depth >= 5 and !in_check and can_iid) {
+                search_depth -|= 1;
             }
 
             // PVS
@@ -648,8 +671,9 @@ pub const SearchThread = struct {
             if (remaining_depth < 2 or legal_moves < 3) {
                 move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
             } else {
+                const reduced_depth = search_depth - @as(u32, @intCast(reduction));
                 // TODO remove seach extensions from heare when moveordering is better
-                move_eval = -self.search(-(alpha+1), -alpha, search_depth - reduction, ply + 1, extensions_used + search_ext, true);
+                move_eval = -self.search(-(alpha+1), -alpha, reduced_depth, ply + 1, extensions_used + search_ext, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
                     move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
                 }

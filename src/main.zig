@@ -198,7 +198,7 @@ fn bench(alloc: Alloc, io: std.Io, brd: *board.Board, output: *std.Io.Writer) !v
     var dummy_connection: uci.UciConnection = .init(io, &dummy_reader, &dummy_writer, .{});
     defer dummy_connection.deinit();
 
-    const search_time_controls: search.TimeControls = .toDepth(io, 8);
+    const search_time_controls: search.TimeControls = .toDepth(io, 12);
 
     var nodes: u64 = 0;
 
