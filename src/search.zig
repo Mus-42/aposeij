@@ -327,7 +327,7 @@ pub const SearchThread = struct {
         self.qsearch_nodes += 1;
 
         const is_pv_node = root_alpha != root_beta - 1;
-        if (self.brd.isDraw50Moves() or self.brd.repetitionsCount() > 0)
+        if (self.brd.isDraw50Moves() or self.brd.isDrawInsufficientMaterial() or self.brd.repetitionsCount() > 0)
             return 0;
 
         var alpha = @max(root_alpha, @as(i16, @intCast(ply)) - SCORE_MATE_ABS);
@@ -492,7 +492,7 @@ pub const SearchThread = struct {
             }
         }
 
-        if (ply > 0 and (self.brd.isDraw50Moves() or self.brd.repetitionsCount() > 0))
+        if (ply > 0 and (self.brd.isDraw50Moves() or self.brd.isDrawInsufficientMaterial() or self.brd.repetitionsCount() > 0))
             return 0;
 
         if (remaining_depth == 0 or ply >= MAX_PLY) {
@@ -602,18 +602,22 @@ pub const SearchThread = struct {
         var legal_moves: u32 = 0;
 
         for (0..moves.count()) |_| {
-            const move, const score = moves.pickNext();
+            const move, const move_score = moves.pickNext();
 
-            const hist_score = if (move.isNoisy()) 
+            const hist_score = if (move.isNoisy())
                 self.history.getNoisy(&self.brd.data, move).*
-            else 
+            else
                 self.history.getQuiet(&self.brd.data, move).*;
+            const hist_divisor: i16 = if (move.isNoisy()) 2000 else 4000;
 
-            if (ply > 0 and score < MOVESCORE_KILLER) {
+            // and  
+            if (ply > 0 and move_score < MOVESCORE_KILLER and eval > SCORE_MATE_EPS - SCORE_MATE_ABS) {
                 // LMP
                 const lmp_factor: u32 = if (improving) 29 else 37;
-                const lmp_margin = (75 + lmp_factor * remaining_depth * remaining_depth) / 32;
-                if (!is_pv_node and !in_check and legal_moves >= lmp_margin) {
+                var lmp_margin: i32 = @intCast(75 + lmp_factor * remaining_depth * remaining_depth);
+                lmp_margin += @divFloor(hist_score, hist_divisor);
+                lmp_margin = @divFloor(lmp_margin, 32);
+                if (!is_pv_node and !in_check and @as(i32, @intCast(legal_moves)) >= lmp_margin) {
                     break;
                 }
             }
@@ -635,15 +639,17 @@ pub const SearchThread = struct {
  
             var search_depth: u32 = remaining_depth - 1 + search_ext;
 
-            // TODO fix move ordering and implement actual LMR
             var reduction: i16 = 0;
-            if (legal_moves > 2 and remaining_depth > 1 and score < MOVESCORE_KILLER) {
+            if (legal_moves > 2 and remaining_depth > 1 and move_score < MOVESCORE_KILLER) {
                 reduction = @intFromFloat(7.0 + @log(@as(f32, @floatFromInt(remaining_depth))) * @log(@as(f32, @floatFromInt(legal_moves))) * 3.5);
-                const hist_divisor: i16 = if (move.isNoisy()) 2000 else 4000;
                 reduction -= @divTrunc(hist_score, hist_divisor);
 
                 if (!is_pv_node and tt_move.isNoisy()) {
                     reduction += 3;
+                }
+
+                if (eval <= SCORE_MATE_EPS - SCORE_MATE_ABS) {
+                    reduction -= 5;
                 }
 
                 if (in_check or new_in_check) {
@@ -671,7 +677,7 @@ pub const SearchThread = struct {
             if (remaining_depth < 2 or legal_moves < 3) {
                 move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
             } else {
-                const reduced_depth = search_depth - @as(u32, @intCast(reduction));
+                const reduced_depth = search_depth -| @as(u32, @intCast(reduction));
                 // TODO remove seach extensions from heare when moveordering is better
                 move_eval = -self.search(-(alpha+1), -alpha, reduced_depth, ply + 1, extensions_used + search_ext, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
@@ -815,26 +821,24 @@ pub const SearchThread = struct {
         self.time_controls.startSearch();
         self.preSearchCleanup();
 
-        var depth_limit: u32 = MAX_PLY;
         var found_at: u16 = MAX_PLY;
-
         var d: u32 = 0;
-        while (d < depth_limit) {
+        while (d < MAX_PLY) {
             d += 1;
 
             const score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
             const is_canceled = self.time_controls.isStopSet();
             
             if (is_canceled) {
+                if (found_at < MAX_PLY) {
+                    return plyToMoves(found_at);
+                }
                 return error.TimeExpired;
             }
             
             if (scoreToMateInPlyAbs(score)) |mate_at_ply| {
                 found_at = @min(found_at, mate_at_ply);
-                // TODO smarter depth limit
-                depth_limit = @min(depth_limit, mate_at_ply+6);
             }
-
         }
 
         return plyToMoves(found_at);

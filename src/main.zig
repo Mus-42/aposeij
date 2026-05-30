@@ -344,7 +344,7 @@ fn run_testsuite(alloc: Alloc, io: std.Io, brd: *board.Board, filename: []const 
 
             brd.setBoardData(bd);
 
-            const TIME_LIMIT = std.time.ns_per_s * 20;
+            const TIME_LIMIT = std.time.ns_per_ms * 50;
             search_thread.time_controls = .toTime(io, TIME_LIMIT);
             const mate_in = search_thread.searchToMate(brd) catch |err| {
                 switch (err) {

@@ -1245,9 +1245,23 @@ pub const Board = struct {
         return repetitions;
     }
 
-
     pub fn isDraw50Moves(self: *const Self) bool {
         return self.data.halfmoves50 >= 50;
+    }
+
+    pub fn isDrawInsufficientMaterial(self: *const Self) bool {
+        const p = &self.data.pieces;
+        if (@popCount(p[@intFromEnum(PieceKind.w_pawn)] | p[@intFromEnum(PieceKind.b_pawn)]) > 0)
+            return false;
+        if (@popCount(p[@intFromEnum(PieceKind.w_rook)] | p[@intFromEnum(PieceKind.w_queen)]) > 0)
+            return false;
+        if (@popCount(p[@intFromEnum(PieceKind.b_rook)] | p[@intFromEnum(PieceKind.b_queen)]) > 0)
+            return false;
+        if (@popCount(p[@intFromEnum(PieceKind.w_knight)] | p[@intFromEnum(PieceKind.w_bishop)]) > 1)
+            return false;
+        if (@popCount(p[@intFromEnum(PieceKind.b_knight)] | p[@intFromEnum(PieceKind.b_bishop)]) > 1)
+            return false;
+        return true;
     }
 
     pub fn setBoardData(self: *Self, bd: BoardData) void {
