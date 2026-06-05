@@ -13,7 +13,6 @@ const Board = board.Board;
 
 pub const MAX_PLY = 128;
 pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_min; 
-pub const MAX_EXTENSIONS = 8;
 
 pub const QS_TT_DEPTH = 0;
 
@@ -174,12 +173,6 @@ const PVMoves = struct {
         @memcpy(pv[1..][0..next_pv.len], next_pv);
         pv[0] = move;
         self.pv_len[ply] = @intCast(1 + next_pv.len);
-    }
-
-    fn updateRootPv(self: *Self) void {
-        const pv = self.perPly(0);
-        @memcpy(self.root_pv[0..pv.len], pv);
-        @memset(self.root_pv[pv.len..], Move.NULL);
     }
 };
 
@@ -468,7 +461,6 @@ pub const SearchThread = struct {
         root_beta: i16,
         remaining_depth: u32,
         ply: u32,
-        extensions_used: u32,
         allow_null: bool,
     ) i16 {
         if (ply > 0 and self.time_controls.isHardStop(self.nodes, self.qsearch_nodes)) {
@@ -478,6 +470,8 @@ pub const SearchThread = struct {
         const in_check = self.brd.data.is_in_check;
         const is_pv_node = root_alpha != root_beta - 1;
         const zobrist_key = self.brd.data.zobrist_key;
+
+        std.debug.assert(is_pv_node or ply > 0);
 
         self.pv.clearPly(ply);
         self.nodes += 1;
@@ -566,7 +560,7 @@ pub const SearchThread = struct {
                 if (!is_pawns_only and !self.brd.makeNullMove()) {
                     // TODO eval-based reduction
                     const depth_reduction = @min((11 + remaining_depth * 5) / 8, 6);
-                    const nm_score = -self.search(-beta, -beta + 1, remaining_depth -| depth_reduction, ply+1, extensions_used, false);
+                    const nm_score = -self.search(-beta, -beta + 1, remaining_depth -| depth_reduction, ply+1, false);
                     self.brd.unmakeNullMove();
                     if (self.time_controls.isStopSet()) {
                         return alpha;
@@ -647,7 +641,6 @@ pub const SearchThread = struct {
             //         search_ext += 1;
             //     }
             // }
-            search_ext = @min(search_ext + extensions_used, MAX_EXTENSIONS) - extensions_used;
  
             var search_depth: u32 = remaining_depth - 1 + search_ext;
 
@@ -689,12 +682,12 @@ pub const SearchThread = struct {
             // TODO simpify it
             var move_eval: i16 = -SCORE_INFINITY;
             if (remaining_depth <= 1 or legal_moves <= 1) {
-                move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
+                move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, false);
             } else {
                 const reduced_depth = search_depth -| @as(u32, @intCast(reduction));
-                move_eval = -self.search(-alpha-1, -alpha, reduced_depth, ply + 1, extensions_used, true);
+                move_eval = -self.search(-alpha-1, -alpha, reduced_depth, ply + 1, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
-                    move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used, false);
+                    move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, false);
                 }
             }
 
@@ -786,18 +779,17 @@ pub const SearchThread = struct {
 
             var score: i16 = 0;
             if (d < 7 or @abs(prev_score) >= SCORE_MATE_ABS - SCORE_MATE_EPS) {
-                score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+                score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, false);
             } else {
                 const WINDOW: i16 = 30;
-                score = self.search(prev_score-WINDOW, prev_score+WINDOW, d, 0, 0, false);
+                score = self.search(prev_score-WINDOW, prev_score+WINDOW, d, 0, false);
                 if (score < prev_score-WINDOW or prev_score+WINDOW < score) {
-                    score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+                    score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, false);
                 }
             }
 
 
             prev_score = score;
-            self.pv.updateRootPv();
             const search_iteration_end = std.Io.Timestamp.now(self.io, .awake);
             const search_time = self.time_controls.search_start.durationTo(search_iteration_end);
 
@@ -852,7 +844,7 @@ pub const SearchThread = struct {
         while (d < MAX_PLY) {
             d += 1;
 
-            const score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+            const score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, false);
             const is_canceled = self.time_controls.isStopSet();
             
             if (is_canceled) {
