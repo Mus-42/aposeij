@@ -7,6 +7,20 @@ const Move = board.Move;
 const PieceKind = board.PieceKind;
 const Board = board.Board;
 
+pub fn bonusAtDepth(depth: u32) i16 {
+    const d: i32 = @intCast(depth);
+    // TODO this is better only for fast TC (low depth)
+    var b: i32 = 140 * d * d;
+    b -= 100;
+    b = @divTrunc(b, 256);
+    b = @max(1, @min(b, 8500));
+    return @intCast(b);
+}
+
+pub fn malusAtDepth(depth: u32) i16 {
+    return bonusAtDepth(depth);
+}
+
 pub const History = struct {
     // TODO experiment with non-butterfly tables
     quiet: [2][64][64]i16,

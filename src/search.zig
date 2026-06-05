@@ -281,8 +281,12 @@ pub const SearchThread = struct {
             return MOVESCORE_BAD_CAPTURE + score;
         }
 
-        const move_history = self.history.getQuiet(&self.brd.data, move).*;
-        return @min(@max(move_history, MOVESCORE_BAD_CAPTURE), MOVESCORE_KILLER);
+
+        var score = self.history.getQuiet(&self.brd.data, move).*;
+
+        _ = &score;
+
+        return @min(@max(score, MOVESCORE_BAD_CAPTURE), MOVESCORE_KILLER);
     }
 
     fn scoreMoveQsearch(self: *Self, move: Move, tt_move: Move) i16 {
@@ -622,6 +626,8 @@ pub const SearchThread = struct {
                 }
             }
 
+            // const piece = self.brd.data.getPieceAt(move.from).?;
+
             if (self.brd.makeMove(move))
                 continue;
             legal_moves += 1;
@@ -635,6 +641,12 @@ pub const SearchThread = struct {
             if (move.is_promotion and move.extra.promotion == .queen) {
                 search_ext += 1;
             }
+            // if (piece == .w_pawn or piece == .b_pawn) {
+            //     const rank = move.to >> 3;
+            //     if (rank == 1 or rank == 6) {
+            //         search_ext += 1;
+            //     }
+            // }
             search_ext = @min(search_ext + extensions_used, MAX_EXTENSIONS) - extensions_used;
  
             var search_depth: u32 = remaining_depth - 1 + search_ext;
@@ -672,16 +684,17 @@ pub const SearchThread = struct {
                 search_depth -|= 1;
             }
 
+
             // PVS
+            // TODO simpify it
             var move_eval: i16 = -SCORE_INFINITY;
-            if (remaining_depth < 2 or legal_moves < 3) {
+            if (remaining_depth <= 1 or legal_moves <= 1) {
                 move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
             } else {
                 const reduced_depth = search_depth -| @as(u32, @intCast(reduction));
-                // TODO remove seach extensions from heare when moveordering is better
-                move_eval = -self.search(-(alpha+1), -alpha, reduced_depth, ply + 1, extensions_used + search_ext, true);
+                move_eval = -self.search(-alpha-1, -alpha, reduced_depth, ply + 1, extensions_used, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
-                    move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used + search_ext, false);
+                    move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, extensions_used, false);
                 }
             }
 
@@ -701,8 +714,8 @@ pub const SearchThread = struct {
 
                 tt_bound = .lower;
 
-                const bonus: i16 = @intCast(remaining_depth * remaining_depth);
-                const malus: i16 = bonus; // TODO
+                const bonus: i16 = hist.bonusAtDepth(remaining_depth);
+                const malus: i16 = hist.malusAtDepth(remaining_depth);
                 if (!best_move.isNoisy()) {
                     self.history.updateQuiet(&self.brd.data, best_move, bonus);
                     for (moves.moves()) |quiet| {
@@ -765,12 +778,25 @@ pub const SearchThread = struct {
         const fen = board.writeFen(&fen_buf, brd.data);
 
         var d: u32 = 0;
+        var prev_score: i16 = -SCORE_INFINITY;
         while (true) {
             d += 1;
 
             self.logger.startNewSearch(fen, key) catch {};
 
-            const score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+            var score: i16 = 0;
+            if (d < 7 or @abs(prev_score) >= SCORE_MATE_ABS - SCORE_MATE_EPS) {
+                score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+            } else {
+                const WINDOW: i16 = 30;
+                score = self.search(prev_score-WINDOW, prev_score+WINDOW, d, 0, 0, false);
+                if (score < prev_score-WINDOW or prev_score+WINDOW < score) {
+                    score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, 0, false);
+                }
+            }
+
+
+            prev_score = score;
             self.pv.updateRootPv();
             const search_iteration_end = std.Io.Timestamp.now(self.io, .awake);
             const search_time = self.time_controls.search_start.durationTo(search_iteration_end);
