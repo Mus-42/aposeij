@@ -22,8 +22,7 @@ pub const PIECE_COST_ABS = [12][2]i16{
 };
 
 pub const GAME_PHASE_INCREMENT: [12]u8 = .{ 0, 2, 3, 5, 9, 0, 0, 2, 3, 5, 9, 0 };
-pub const GAME_PHASE_MAX: u8 = (2 + 3 + 5 + 9) * 4;
-pub const GAME_PHASE_ENDGAME_LIM: u8 = 64;//GAME_PHASE_MAX * 5 / 7;
+pub const GAME_PHASE_ENDGAME_LIM: u8 = 64;
 
 const PER_SQUARE_BONUS: [6][2][64]i16 = .{
     .{

@@ -68,11 +68,6 @@ pub const TTable = struct {
 
     // TODO resize function
 
-    fn isMateScore(score: i16) bool {
-        const abs_score: i16 = @intCast(@abs(score));
-        return search.SCORE_MATE_ABS - abs_score <= search.SCORE_MATE_EPS;
-    }
-
     // A:
     // (old_ply - MATE_ABS) - old_ply + new_ply
     // B:
@@ -80,19 +75,21 @@ pub const TTable = struct {
 
     fn restoreScore(stored_score: i16, ply: u32) i16 {
         var score = stored_score;
-        if (isMateScore(score)) {
+
+        if (search.scoreToMateInPlyAbs(score) != null) {
             if (score > 0) {
                 score -= @intCast(ply);
             } else {
                 score += @intCast(ply);
             }
         }
+
         return score;
     }
 
     fn storeScore(raw_score: i16, ply: u32) i16 {
         var score = raw_score;
-        if (isMateScore(score)) {
+        if (search.scoreToMateInPlyAbs(score) != null) {
             if (score > 0) {
                 score += @intCast(ply);
             } else {

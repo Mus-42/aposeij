@@ -11,6 +11,7 @@ pub fn bonusAtDepth(depth: u32) i16 {
     const d: i32 = @intCast(depth);
     // TODO this is better only for fast TC (low depth)
     var b: i32 = 140 * d * d;
+    // b += 200 * d;
     b -= 100;
     b = @divTrunc(b, 256);
     b = @max(1, @min(b, 8500));

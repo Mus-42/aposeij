@@ -1019,8 +1019,9 @@ pub const Board = struct {
 
         pub fn scoreMgEgToCurrent(self: *const BoardData, mg: i16, eg: i16) i16 {
             var game_phase: i32 = self.game_phase;
-            game_phase = @min(game_phase, eval.GAME_PHASE_ENDGAME_LIM);
-            return @intCast(@divTrunc(mg * game_phase + eg * (eval.GAME_PHASE_ENDGAME_LIM - game_phase), eval.GAME_PHASE_ENDGAME_LIM));
+            const PHASE_LIM = eval.GAME_PHASE_ENDGAME_LIM;
+            game_phase = @max(0, @min(game_phase, PHASE_LIM));
+            return @intCast(@divTrunc(mg * game_phase + eg * (PHASE_LIM - game_phase), PHASE_LIM));
         }
 
         pub fn extractWhiteEval(self: *const BoardData) i16 {

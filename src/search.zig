@@ -11,7 +11,9 @@ const Move = board.Move;
 const PieceKind = board.PieceKind;
 const Board = board.Board;
 
-pub const MAX_PLY = 128;
+pub const MAX_PLY = 512;
+pub const MAX_ITERATIVE_DEEPENING_DEPTH = 64;
+pub const MAX_SEARCH_PLY = 256;
 pub const MAX_THINKING_TIME_NS = 30 * std.time.ns_per_min; 
 
 pub const QS_TT_DEPTH = 0;
@@ -57,7 +59,7 @@ pub fn scoreToMateInMovesAbs(score: i16) ?u16 {
 pub const TimeControls = struct {
     io: std.Io,
     available_time_ns: u64 = MAX_THINKING_TIME_NS,
-    depth_limit: u32 = MAX_PLY,
+    depth_limit: u32 = MAX_ITERATIVE_DEEPENING_DEPTH,
     nodes_limit: u64 = std.math.maxInt(u64),
     search_start: std.Io.Timestamp = undefined,
     is_exiting_search: std.atomic.Value(bool) = .init(false),
@@ -356,7 +358,7 @@ pub const SearchThread = struct {
         }
 
         // TODO make something about that?
-        if (ply >= MAX_PLY)
+        if (ply >= MAX_SEARCH_PLY)
             return eval;
 
         if (eval >= beta) {
@@ -493,7 +495,7 @@ pub const SearchThread = struct {
         if (ply > 0 and (self.brd.isDraw50Moves() or self.brd.isDrawInsufficientMaterial() or self.brd.repetitionsCount() > 0))
             return 0;
 
-        if (remaining_depth == 0 or ply >= MAX_PLY) {
+        if (remaining_depth == 0 or ply >= MAX_SEARCH_PLY) {
             return self.qsearch(alpha, beta, ply);
         }
 
@@ -687,7 +689,7 @@ pub const SearchThread = struct {
                 const reduced_depth = search_depth -| @as(u32, @intCast(reduction));
                 move_eval = -self.search(-alpha-1, -alpha, reduced_depth, ply + 1, true);
                 if (move_eval > alpha and (is_pv_node or reduction > 0)) {
-                    move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, false);
+                    move_eval = -self.search(-beta, -alpha, search_depth, ply + 1, !is_pv_node);
                 }
             }
 
@@ -839,19 +841,16 @@ pub const SearchThread = struct {
         self.time_controls.startSearch();
         self.preSearchCleanup();
 
-        var found_at: u16 = MAX_PLY;
+        var found_at: u16 = MAX_ITERATIVE_DEEPENING_DEPTH;
         var d: u32 = 0;
-        while (d < MAX_PLY) {
+        while (d < MAX_ITERATIVE_DEEPENING_DEPTH) {
             d += 1;
 
             const score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, false);
             const is_canceled = self.time_controls.isStopSet();
             
             if (is_canceled) {
-                if (found_at < MAX_PLY) {
-                    return plyToMoves(found_at);
-                }
-                return error.TimeExpired;
+                break;
             }
             
             if (scoreToMateInPlyAbs(score)) |mate_at_ply| {
@@ -859,7 +858,10 @@ pub const SearchThread = struct {
             }
         }
 
-        return plyToMoves(found_at);
+        if (found_at < MAX_ITERATIVE_DEEPENING_DEPTH) {
+            return plyToMoves(found_at);
+        }
+        return error.TimeExpired;
     }
 };
 
