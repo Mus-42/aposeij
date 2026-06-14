@@ -199,8 +199,7 @@ pub const UciConnection = struct {
 
     
 
-    pub fn parseGoArgs(self: *const Self, args_str: []const u8, side_to_move: board.SideToMove) !search.TimeControls {
-
+    pub fn parseGoArgs(self: *const Self, args_str: []const u8, move_overhead: u64, side_to_move: board.SideToMove) !search.TimeControls {
         const GoArgs = struct {
             depth: ?u32 = null,
             wtime: ?u32 = null,
@@ -267,6 +266,7 @@ pub const UciConnection = struct {
         // TODO movestogo
 
         var time_controls: search.TimeControls = .toDepth(self.io, 8);
+        const MIN_SEARCH_TIME = 5000;
 
         if (args.infinite) {
             time_controls = .infinite(self.io);
@@ -279,20 +279,32 @@ pub const UciConnection = struct {
             args.nodes = null;
         } else if (args.movetime) |time| {
             const limit_ns = std.time.ns_per_ms * @as(u64, time);
-            time_controls = .toTime(self.io, limit_ns);
+            time_controls = .toTime(self.io, @max(limit_ns -| move_overhead, MIN_SEARCH_TIME));
             args.movetime = null;
         } else {
-            const TIME_EXTRA_NS = 5000;
+            var has_time = false;
+            var time: u64 = 0;
+            var inctime: u64 = 0;
             // TODO move that to other function
             if (side_to_move == .white and args.wtime != null) {
-                const time_ns = std.time.ns_per_ms * @as(u64, args.wtime.?) / 20 + std.time.ns_per_ms * @as(u64, args.winc orelse 0) / 2;
-                time_controls = .toTime(self.io, time_ns -| TIME_EXTRA_NS);
-                args.wtime = null;
+                inctime = std.time.ns_per_ms * @as(u64, args.winc orelse 0);
+                time = std.time.ns_per_ms * @as(u64, args.wtime.?);
+                has_time = true;
             }
             if (side_to_move == .black and args.btime != null) {
-                const time_ns = std.time.ns_per_ms * @as(u64, args.btime.?) / 20 + std.time.ns_per_ms * @as(u64, args.binc orelse 0) / 2;
-                time_controls = .toTime(self.io, time_ns -| TIME_EXTRA_NS);
-                args.btime = null;
+                inctime = std.time.ns_per_ms * @as(u64, args.binc orelse 0);
+                time = std.time.ns_per_ms * @as(u64, args.btime.?);
+                has_time = true;
+            }
+
+            if (has_time) {
+                const time_ns = (time -| move_overhead) / 20 + inctime / 2;
+                time_controls = .toTime(self.io, @max(time_ns, MIN_SEARCH_TIME));
+
+                args.winc = null;
+                args.wtime = null;
+                args.binc = null;
+                args.wtime = null;
             }
         }
 

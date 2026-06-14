@@ -91,8 +91,7 @@ pub fn main(init: std.process.Init) !void {
             .quit => break,
             .position => try uci_connection.parsePositionArgs(command.arguments, &control.brd),
             .go => {
-                var time_controls = try uci_connection.parseGoArgs(command.arguments, control.brd.data.side_to_move);
-                time_controls.move_overhead_ns = move_overhead;
+                const time_controls = try uci_connection.parseGoArgs(command.arguments, move_overhead, control.brd.data.side_to_move);
                 try control.waitUntilSearchEnded();
                 try control.startSearch(time_controls);
             },
