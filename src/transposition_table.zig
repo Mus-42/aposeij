@@ -62,6 +62,16 @@ pub const TTable = struct {
         self.stats = .{};
     }
 
+    pub fn resize(self: *Self, alloc: Alloc, tt_size_in_mb: usize) !void {
+        const size_buckets = (tt_size_in_mb << 20) / @sizeOf(TTBucket);
+        const new_tt = try alloc.alloc(TTBucket, size_buckets);
+        errdefer alloc.free(new_tt);
+        alloc.free(self.buckets);
+        self.buckets = new_tt;
+        // TODO copy old buckets into new instead?
+        self.clear();
+    }
+
     pub fn deinit(self: *Self, alloc: Alloc) void {
         alloc.free(self.buckets);
     }

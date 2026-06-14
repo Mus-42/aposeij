@@ -53,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
 
     g_control = control;
 
+    var move_overhead: u64 = search.DEFAULT_MOVE_OVERHEAD_NS;
+
     while (true) {
         if (exit_requested) break;
 
@@ -65,7 +67,22 @@ pub fn main(init: std.process.Init) !void {
 
         switch (command.command) {
             .uci => try uci_connection.uciok(),
-            .setoption => {},
+            .setoption => {
+                const name, const value = try uci_connection.parseSetOptionArgs(command.arguments);
+                if (name == null) continue;
+                if (std.mem.eql(u8, name.?, "Hash")) {
+                    var new_hash = std.fmt.parseInt(u32, value.?, 10) catch continue;
+                    new_hash = @min(@max(1, new_hash), 262144);
+                    try control.search_thread.tt.resize(alloc, new_hash);
+                } else if (std.mem.eql(u8, name.?, "Move Overhead")) {
+                    // in ms
+                    move_overhead = std.fmt.parseInt(u32, value.?, 10) catch continue;
+                    move_overhead = @min(move_overhead, 5000);
+                    // to ns
+                    move_overhead *= std.time.ns_per_ms;
+                }
+                // TODO warn?
+            },
             .isready => {
                 try control.waitUntilSearchEnded();
                 try uci_connection.readyok();
@@ -74,7 +91,8 @@ pub fn main(init: std.process.Init) !void {
             .quit => break,
             .position => try uci_connection.parsePositionArgs(command.arguments, &control.brd),
             .go => {
-                const time_controls = try uci_connection.parseGoArgs(command.arguments, control.brd.data.side_to_move);
+                var time_controls = try uci_connection.parseGoArgs(command.arguments, control.brd.data.side_to_move);
+                time_controls.move_overhead_ns = move_overhead;
                 try control.waitUntilSearchEnded();
                 try control.startSearch(time_controls);
             },

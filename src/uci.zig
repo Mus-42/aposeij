@@ -23,7 +23,7 @@ pub const HELP =
     \\  go nodes NODES                                              search exactly NODES nodes
     \\  go [TODO options]                                           TODO message
     \\  ucinewgame                                                  clear cache
-    \\  setoption                                                   NOOP
+    \\  setoption name NAME [value VALUE]                           set engine option
     \\  ponderhit                                                   NOOP
     \\  help                                                        print this message
     \\
@@ -39,6 +39,9 @@ pub const UCI_ID =
     \\id name
     ++ " " ++ options.aposeij_version_string ++
     \\id author Mus_42
+    \\
+    \\option name Hash type spin default 64 min 1 max 262144
+    \\option name Move Overhead type spin default 1 min 0 max 5000
     \\
     ;
 
@@ -129,6 +132,23 @@ pub const UciConnection = struct {
         if (!self.options.strict_mode) return;
         try self.stdout.print("error: " ++ msg ++ "\n", args);
         try self.stdout.flush();
+    }
+
+    pub fn parseSetOptionArgs(self: *const Self, args: []const u8) !struct { ?[]const u8, ?[]const u8 } {
+        _ = self;
+        // TODO warnings in case something is wrong with args
+
+        const name_beg = std.mem.indexOf(u8, args, "name").? + 4;
+        const value_beg = std.mem.indexOf(u8, args, "value");
+    
+        const name_end = value_beg orelse args.len;
+        const name = std.mem.trim(u8, args[name_beg..name_end], &std.ascii.whitespace);
+        if (value_beg == null) {
+            return .{ name, null };
+        }
+
+        const value = std.mem.trim(u8, args[value_beg.?+5..], &std.ascii.whitespace);
+        return .{ name, value };
     }
 
     pub fn parsePositionArgs(self: *const Self, args: []const u8, brd: *Board) !void {

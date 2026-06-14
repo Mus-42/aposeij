@@ -22,7 +22,7 @@ pub const SCORE_MATE_ABS = 32000;
 pub const SCORE_MATE_EPS = MAX_PLY;
 pub const SCORE_INFINITY = SCORE_MATE_ABS+1;
 
-pub const TIME_EPS_NS: u64 = 2000;
+pub const DEFAULT_MOVE_OVERHEAD_NS: u64 = 1000000;
 
 
 // order:
@@ -59,6 +59,7 @@ pub fn scoreToMateInMovesAbs(score: i16) ?u16 {
 pub const TimeControls = struct {
     io: std.Io,
     available_time_ns: u64 = MAX_THINKING_TIME_NS,
+    move_overhead_ns: u64 = DEFAULT_MOVE_OVERHEAD_NS,
     depth_limit: u32 = MAX_ITERATIVE_DEEPENING_DEPTH,
     nodes_limit: u64 = std.math.maxInt(u64),
     search_start: std.Io.Timestamp = undefined,
@@ -102,7 +103,7 @@ pub const TimeControls = struct {
         const total_nodes = nodes + qnodes;
         if (total_nodes & 0x3FF == 0x3FF) {
             const passed = self.search_start.untilNow(self.io, .awake);
-            if (self.available_time_ns -| passed.nanoseconds <= TIME_EPS_NS) {
+            if (self.available_time_ns -| passed.nanoseconds <= self.move_overhead_ns) {
                 self.is_exiting_search.store(true, .unordered);
                 return true;
             }
@@ -118,7 +119,7 @@ pub const TimeControls = struct {
             return true;
         }
         const passed = self.search_start.untilNow(self.io, .awake);
-        if (self.available_time_ns -| (@divTrunc(passed.nanoseconds * 5, 3)) <= TIME_EPS_NS) {
+        if (self.available_time_ns -| (@divTrunc(passed.nanoseconds * 5, 3)) <= self.move_overhead_ns) {
             self.is_exiting_search.store(true, .unordered);
             return true;
         }
