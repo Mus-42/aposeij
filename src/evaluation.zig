@@ -176,6 +176,26 @@ pub const BONUS_TABLES: [12][64][2]i16 = blk: {
     break :blk bonus;
 };
 
+pub const MOBILITY_TABLE: [12]i16 = .{
+     21,  37,  40,  53,  67, -15,
+    -21, -37, -40, -53, -67,  15,
+};
+
+pub fn mobility(brd: *const board.Board) i16 {
+    // TODO this is slow and dumb but it gains anyway so...
+    var bonus: i16 = 0;
+    inline for (0..12) |i| {
+        const piece: board.PieceKind = @enumFromInt(i);
+        var pieces = brd.data.pieces[i];
+        while (pieces != 0) : (pieces &= pieces - 1) {
+            const square: board.Square = @intCast(@ctz(pieces));
+            const moves = brd.movegen.getMovesBitboard(false, &brd.data, piece, false, square);
+            bonus += MOBILITY_TABLE[i] * @popCount(moves);
+        }
+    }
+    return @divTrunc(bonus, 16);
+}
+
 // const BONUS_TABLES_BYTEWISE: [12][8][256][2]i16 = blk: {
 //     @setEvalBranchQuota(1000000);
 //

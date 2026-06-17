@@ -750,7 +750,7 @@ pub const Movegen = struct {
     }
         
     // white piece -> all moves, black piece -> only attacks (isAttackedBy)
-    fn getMovesBitboard(self: *const Self, comptime is_captures_only: bool, bd: *const Board.BoardData, comptime kind: PieceKind, comptime rev_attacks: bool, pos: Square) u64 {
+    pub fn getMovesBitboard(self: *const Self, comptime is_captures_only: bool, bd: *const Board.BoardData, comptime kind: PieceKind, comptime rev_attacks: bool, pos: Square) u64 {
         const they = if (bd.side_to_move == .white) bd.black else bd.white;
         const blockers = bd.white | bd.black;
 
@@ -1024,22 +1024,9 @@ pub const Board = struct {
             return @intCast(@divTrunc(mg * game_phase + eg * (PHASE_LIM - game_phase), PHASE_LIM));
         }
 
-        pub fn extractWhiteEval(self: *const BoardData) i16 {
-            return self.scoreMgEgToCurrent(self.score_midgame, self.score_endgame);
-        }
-
         pub fn currentPieceCost(self: *const BoardData, piece_kind: PieceKind) i16 {
             const i = @intFromEnum(piece_kind);
             return self.scoreMgEgToCurrent(eval.PIECE_COST_ABS[i][0], eval.PIECE_COST_ABS[i][1]);
-        }
-
-        pub fn extractEval(self: *const BoardData) i16 {
-            const white_score = self.extractWhiteEval();
-            if (self.side_to_move == .white) {
-                return white_score;
-            } else {
-                return -white_score;
-            }
         }
 
         pub fn recomputeZobristKey(self: *BoardData) void {
@@ -1271,6 +1258,21 @@ pub const Board = struct {
         self.data.recomputeZobristKey();
         self.data.recomputeScores();
         self.data.is_in_check = self.movegen.isKingInCheck(&self.data);
+    }
+
+    pub fn extractWhiteEval(self: *const Self) i16 {
+        const piece_square = self.data.scoreMgEgToCurrent(self.data.score_midgame, self.data.score_endgame);
+        const mobility = eval.mobility(self);
+        return piece_square + mobility;
+    }
+
+    pub fn extractEval(self: *const Self) i16 {
+        const white_score = self.extractWhiteEval();
+        if (self.data.side_to_move == .white) {
+            return white_score;
+        } else {
+            return -white_score;
+        }
     }
     
     pub fn clearHistory(self: *Self) void {

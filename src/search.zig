@@ -235,7 +235,7 @@ pub const SearchThread = struct {
     }
 
     fn evalPosition(self: *Self) i16 {
-        return self.brd.data.extractEval();
+        return self.brd.extractEval();
     }
 
     fn preSearchCleanup(self: *Self) void {
@@ -396,11 +396,15 @@ pub const SearchThread = struct {
         for (0..moves.count()) |_| {
             const move, const score = moves.pickNext();
             _ = score;
-            if (!in_check and moves_played >= 4)
-                break;
+    
+            if (eval > SCORE_MATE_EPS - SCORE_MATE_ABS) {
+                if (moves_played >= 2) {
+                    break;
+                }
 
-            if (!in_check and moves_played >= 2 and move.is_capture and self.brd.seeAfterMove(move) < 1)
-                continue;
+                if (!in_check and move.is_capture and self.brd.seeAfterMove(move) < 1)
+                    continue;
+            }
 
             if (self.brd.makeMove(move))
                 continue;
