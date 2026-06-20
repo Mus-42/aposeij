@@ -9,17 +9,18 @@ pub const TTEntry = struct {
     // lower 16 bits of tt key
     depth: u8,
     score: i16,
+    static_eval: i16,
     move: Move,
     bound: Bound, 
 };
 
 pub const TTBucket = struct {
-    key_low: [4]u16 align(32),
-    entries: [4]TTEntry,
+    key_low: [3]u16 align(32),
+    entries: [3]TTEntry,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(TTEntry) == 6);
+    std.debug.assert(@sizeOf(TTEntry) == 8);
     std.debug.assert(@alignOf(TTEntry) == 2);
     std.debug.assert(@sizeOf(TTBucket) == 32);
     std.debug.assert(@alignOf(TTBucket) == 32);
@@ -122,15 +123,15 @@ pub const TTable = struct {
         const tt_index, const lower_key = self.indicies(zobrist_key);
         const tt_bucket = &self.buckets[tt_index];
 
-        var pos: usize = 4;
-        inline for (0..4) |i| {
+        var pos: usize = 3;
+        inline for (0..3) |i| {
             if (tt_bucket.key_low[i] == lower_key) {
                 pos = i;
                 break;
             }
         }
 
-        if (pos >= 4) {
+        if (pos >= 3) {
             self.stats.misses += 1;
             return null;
         }
@@ -140,12 +141,12 @@ pub const TTable = struct {
         return entry;
     }
 
-    pub fn put(self: *Self, zobrist_key: u64, ply: u32, depth: u8, score: i16, bound: Bound, move: Move) void {
+    pub fn put(self: *Self, zobrist_key: u64, ply: u32, depth: u8, score: i16, static_eval: i16, bound: Bound, move: Move) void {
         const tt_index, const lower_key = self.indicies(zobrist_key);
         const tt_bucket = &self.buckets[tt_index];
 
-        var entry_i: usize = 4;
-        inline for (0..4) |i| {
+        var entry_i: usize = 3;
+        inline for (0..3) |i| {
             if (tt_bucket.key_low[i] == lower_key) {
                 // if (tt_bucket.entries[i].depth > depth) return;
                 self.stats.collisions += 1;
@@ -154,9 +155,9 @@ pub const TTable = struct {
             }
         }
 
-        if (entry_i >= 4) {
-            tt_bucket.entries[1..4].* = tt_bucket.entries[0..3].*;
-            tt_bucket.key_low[1..4].* = tt_bucket.key_low[0..3].*;
+        if (entry_i >= 3) {
+            tt_bucket.entries[1..3].* = tt_bucket.entries[0..2].*;
+            tt_bucket.key_low[1..3].* = tt_bucket.key_low[0..2].*;
             entry_i = 0;
         }
 
@@ -164,6 +165,7 @@ pub const TTable = struct {
         tt_bucket.entries[entry_i] = .{
             .move = move,
             .score = storeScore(score, ply),
+            .static_eval = static_eval,
             .depth = depth,
             .bound = bound,
         };

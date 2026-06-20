@@ -118,7 +118,7 @@ pub const TimeControls = struct {
             return true;
         }
         const passed = self.search_start.untilNow(self.io, .awake);
-        if (self.available_time_ns <= (@divTrunc(passed.nanoseconds * 5, 3))) {
+        if (self.available_time_ns <= (@divTrunc(passed.nanoseconds * 5, 4))) {
             self.is_exiting_search.store(true, .unordered);
             return true;
         }
@@ -196,7 +196,7 @@ pub const SearchThread = struct {
     const PerPly = struct {
         eval: i16,
         static_eval: i16,
-        killers: [2]Move,
+        killer: Move,
         moves: board.MoveList,
     };
 
@@ -249,8 +249,7 @@ pub const SearchThread = struct {
             return MOVESCORE_TT;
         }
 
-        const k = &self.per_ply[ply].killers;
-        if (k[0] == move or k[1] == move) {
+        if (self.per_ply[ply].killer == move) {
             const score: i16 = MOVESCORE_KILLER;
             return score;
         }
@@ -321,11 +320,12 @@ pub const SearchThread = struct {
         }
 
         const in_check = self.brd.data.is_in_check;
+        const is_pv_node = root_alpha != root_beta - 1;
+
         self.pv.clearPly(ply);
 
         self.qsearch_nodes += 1;
 
-        const is_pv_node = root_alpha != root_beta - 1;
         if (self.brd.isDraw50Moves() or self.brd.isDrawInsufficientMaterial() or self.brd.repetitionsCount() > 0)
             return 0;
 
@@ -336,10 +336,14 @@ pub const SearchThread = struct {
             return alpha;
         }
 
-        var eval = self.evalPosition();
+        const score_mate: i16 = @as(i16, @intCast(ply)) - SCORE_MATE_ABS;
+        
+        var static_eval = -score_mate;
+        var eval = static_eval;
 
         const zobrist_key = self.brd.data.zobrist_key;
         var tt_move: Move = .NULL;
+
 
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             if (!is_pv_node and (tt_entry.bound == .exact or 
@@ -349,12 +353,21 @@ pub const SearchThread = struct {
             }
 
             tt_move = tt_entry.move;
+            static_eval = tt_entry.static_eval;
+            eval = static_eval;
 
-            if (tt_entry.bound == .exact or 
-                tt_entry.bound == .lower and tt_entry.score >= eval or
-                tt_entry.bound == .upper and tt_entry.score <= eval) {
-                eval = tt_entry.score;
+            // This safety check fails SPRT but (partially) prevents blundering / hallucinating mates ???
+            // TODO find actual solution
+            if (!is_pv_node or !in_check) {
+                if (tt_entry.bound == .exact or
+                    tt_entry.bound == .lower and tt_entry.score >= eval or
+                    tt_entry.bound == .upper and tt_entry.score <= eval) {
+                    eval = tt_entry.score;
+                }
             }
+        } else {
+            static_eval = self.evalPosition();
+            eval = static_eval;
         }
 
         // TODO make something about that?
@@ -368,11 +381,12 @@ pub const SearchThread = struct {
         eval = @max(alpha, eval);
         
         // const pawn_index: u32 = if (self.brd.data.side_to_move == .white) 0 else 6;
-        // const can_promote_a_queen = self.brd.data.pieces[pawn_index] & (board.rankMask(0) | board.rankMask(7)) != 0;
+        // const promotion_rank: u64 = if (self.brd.data.side_to_move == .white) board.rankMask(6) else board.rankMask(1);
+        // const can_promote_a_queen = self.brd.data.pieces[pawn_index] & promotion_rank != 0;
         // TODO more accurate delta pruning
-        // var delta: i16 = 700;
+        // var delta: i16 = 900;
         const delta = 1200;
-        // if (can_promote_a_queen) delta += 700;
+        // if (can_promote_a_queen) delta += 500;
         if (eval < alpha -| delta) {
             return alpha;
         }
@@ -447,17 +461,13 @@ pub const SearchThread = struct {
         //     return eval;
         // }
         
-        self.tt.put(zobrist_key, ply, QS_TT_DEPTH, eval, tt_bound, best_move);
+        self.tt.put(zobrist_key, ply, QS_TT_DEPTH, eval, static_eval, tt_bound, best_move);
 
         return eval;
     }
 
     fn addKiller(self: *Self, ply: u32, move: Move) void {
-        const k = &self.per_ply[ply].killers;
-        if (k[0] != move and k[1] != move) {
-            k[1] = k[0]; 
-            k[0] = move; 
-        }
+        self.per_ply[ply].killer = move;
     }
 
 
@@ -465,7 +475,7 @@ pub const SearchThread = struct {
         self: *Self,
         root_alpha: i16,
         root_beta: i16,
-        remaining_depth: u32,
+        root_remaining_depth: u32,
         ply: u32,
         allow_null: bool,
     ) i16 {
@@ -484,6 +494,8 @@ pub const SearchThread = struct {
 
         var alpha = root_alpha;
         var beta = root_beta;
+        var remaining_depth = root_remaining_depth;
+        _ = &remaining_depth;
 
         self.logger.enterNode(zobrist_key, alpha, beta, false) catch {};
         defer self.logger.exitNode(zobrist_key) catch {};
@@ -505,6 +517,9 @@ pub const SearchThread = struct {
 
         var tt_move: Move = .NULL;
         var can_iid: bool = true;
+
+        var static_eval: i16 = undefined;
+
         if (self.tt.probe(zobrist_key, ply)) |tt_entry| {
             if (!is_pv_node and tt_entry.depth >= remaining_depth and ply > 0) { 
                 if (tt_entry.bound == .exact or 
@@ -515,21 +530,24 @@ pub const SearchThread = struct {
             }
 
             tt_move = tt_entry.move;
+            static_eval = tt_entry.static_eval;
     
-            can_iid = tt_move != Move.NULL and tt_entry.depth + 5 <= remaining_depth;
+            can_iid = tt_move == Move.NULL or tt_entry.depth + 3 < remaining_depth;
             // TODO ..?
             // if (tt_entry.bound == .exact or 
             //     tt_entry.bound == .lower and tt_entry.score >= eval or
             //     tt_entry.bound == .upper and tt_entry.score <= eval) {
             //     eval = tt_entry.score;
             // }
+        } else {
+            can_iid = true;
+            static_eval = self.evalPosition();
         }
 
         if (ply == 0 and self.pv.root_pv[0] != Move.NULL) {
             tt_move = self.pv.root_pv[0];
         }
 
-        const static_eval = self.evalPosition();
         self.per_ply[ply].static_eval = static_eval;
 
 
@@ -540,14 +558,20 @@ pub const SearchThread = struct {
         if (!is_pv_node and !in_check) {
             // RFP
             if (remaining_depth <= 8 and @abs(alpha) < 2000) {
-                const factor: i16 = 80;
-                var margin = factor * @as(i16, @intCast(remaining_depth));
+                const linear_factor: i16 = 80;
+                // const quadratic_factor: i16 = 1;
+                var margin: i16 = 0;
+                margin += linear_factor * @as(i16, @intCast(remaining_depth));
+                // margin += quadratic_factor  * @as(i16, @intCast(remaining_depth * remaining_depth));
                 // TODO double check this. it shouldn't gain but it gains for some reason.
                 if (tt_move == Move.NULL) {
                     margin -|= 50;
                 }
                 if (tt_move.isNoisy()) {
                     margin -|= 50;
+                }
+                if (improving) {
+                    margin -|= 10;
                 }
                 margin = @max(margin, 40);
 
@@ -632,6 +656,7 @@ pub const SearchThread = struct {
                 continue;
             legal_moves += 1;
 
+
             const new_in_check = self.brd.data.is_in_check;
 
             var search_ext: u32 = 0;
@@ -641,18 +666,19 @@ pub const SearchThread = struct {
             if (move.is_promotion and move.extra.promotion == .queen) {
                 search_ext += 1;
             }
+
             // if (piece == .w_pawn or piece == .b_pawn) {
             //     const rank = move.to >> 3;
             //     if (rank == 1 or rank == 6) {
             //         search_ext += 1;
             //     }
             // }
- 
+
             var search_depth: u32 = remaining_depth - 1 + search_ext;
 
             var reduction: i16 = 0;
             if (legal_moves > 2 and remaining_depth > 1 and move_score < MOVESCORE_KILLER) {
-                reduction = @intFromFloat(7.0 + @log(@as(f32, @floatFromInt(remaining_depth))) * @log(@as(f32, @floatFromInt(legal_moves))) * 3.5);
+                reduction = @intFromFloat(6.5 + @log(@as(f32, @floatFromInt(remaining_depth))) * @log(@as(f32, @floatFromInt(legal_moves))) * 3.5);
                 reduction -= @divTrunc(hist_score, hist_divisor);
 
                 if (!is_pv_node and tt_move.isNoisy()) {
@@ -675,11 +701,15 @@ pub const SearchThread = struct {
                     reduction -= 5;
                 }
 
+                if (!improving) {
+                    reduction += 3;
+                }
+
                 reduction = @divTrunc(reduction, 8);
                 reduction = @max(reduction, 0);
             }
 
-            if (remaining_depth >= 5 and !in_check and can_iid) {
+            if (remaining_depth >= 3 and !in_check and can_iid) {
                 search_depth -|= 1;
             }
 
@@ -757,9 +787,35 @@ pub const SearchThread = struct {
         std.debug.assert(ply != 0 or best_move != Move.NULL);
         std.debug.assert(self.pv.perPly(ply)[0] == best_move);
 
-        self.tt.put(zobrist_key, ply, @intCast(remaining_depth), eval, tt_bound, best_move);
+        self.tt.put(zobrist_key, ply, @intCast(remaining_depth), eval, static_eval, tt_bound, best_move);
 
         return eval;
+    }
+
+    pub fn aspirationWindowSearch(
+        self: *Self,
+        prev_iteration_score: i16,
+        depth: u32
+    ) i16 {
+        var delta: i16 = @intCast(10 + (@as(u32, @intCast(@as(i32, prev_iteration_score) * @as(i32, prev_iteration_score))) >> 14));
+        var alpha: i16 = @max(prev_iteration_score -| delta, -SCORE_INFINITY);
+        var beta: i16 = @min(prev_iteration_score +| delta, SCORE_INFINITY);
+        while (true) {
+            const search_score = self.search(alpha, beta, depth, 0, false);
+            if (self.time_controls.isSoftStop(depth))
+                return search_score;
+
+            if (search_score <= alpha) {
+                beta = @divTrunc(alpha +| beta, 2);
+                alpha = @max(alpha -| delta, -SCORE_INFINITY);
+            } else if (search_score >= beta) {
+                beta = @min(beta +| delta, SCORE_INFINITY);
+            } else {
+                return search_score;
+            }
+
+            delta += @divTrunc(delta, 4);
+        }
     }
 
     pub fn bestMove(self: *Self, brd: *Board, uci_connection: *uci.UciConnection) !void {
@@ -778,22 +834,17 @@ pub const SearchThread = struct {
 
         var d: u32 = 0;
         var prev_score: i16 = -SCORE_INFINITY;
+        var score: i16 = 0;
         while (true) {
             d += 1;
 
             self.logger.startNewSearch(fen, key) catch {};
 
-            var score: i16 = 0;
-            if (d < 7 or @abs(prev_score) >= SCORE_MATE_ABS - SCORE_MATE_EPS) {
+            if (d <= 5 or @abs(prev_score) >= SCORE_MATE_ABS - SCORE_MATE_EPS) {
                 score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, false);
             } else {
-                const WINDOW: i16 = 30;
-                score = self.search(prev_score-WINDOW, prev_score+WINDOW, d, 0, false);
-                if (score < prev_score-WINDOW or prev_score+WINDOW < score) {
-                    score = self.search(-SCORE_INFINITY, SCORE_INFINITY, d, 0, false);
-                }
+                score = self.aspirationWindowSearch(score, d);
             }
-
 
             prev_score = score;
             const search_iteration_end = std.Io.Timestamp.now(self.io, .awake);
